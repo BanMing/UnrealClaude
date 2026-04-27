@@ -496,7 +496,7 @@ UAnimStateNode* FAnimStateMachineEditor::FindStateById(
 	UAnimGraphNode_StateMachine* StateMachine,
 	const FString& NodeId)
 {
-	if (!StateMachine) return nullptr;
+	if (!StateMachine || NodeId.IsEmpty()) return nullptr;
 
 	FString Error;
 	UAnimationStateMachineGraph* SMGraph = GetStateMachineGraph(StateMachine, Error);
@@ -507,6 +507,19 @@ UAnimStateNode* FAnimStateMachineEditor::FindStateById(
 		if (UAnimStateNode* StateNode = Cast<UAnimStateNode>(Node))
 		{
 			if (GetNodeId(StateNode) == NodeId)
+			{
+				return StateNode;
+			}
+		}
+	}
+
+	// Fallback: match by UObject name so IDs returned by read-only serialize
+	// paths (GetNodeIdOrName) can be resolved back to the source state node.
+	for (UEdGraphNode* Node : SMGraph->Nodes)
+	{
+		if (UAnimStateNode* StateNode = Cast<UAnimStateNode>(Node))
+		{
+			if (StateNode->GetName() == NodeId)
 			{
 				return StateNode;
 			}
@@ -919,7 +932,7 @@ UAnimStateTransitionNode* FAnimStateMachineEditor::FindTransitionById(
 	UAnimGraphNode_StateMachine* StateMachine,
 	const FString& NodeId)
 {
-	if (!StateMachine) return nullptr;
+	if (!StateMachine || NodeId.IsEmpty()) return nullptr;
 
 	FString Error;
 	UAnimationStateMachineGraph* SMGraph = GetStateMachineGraph(StateMachine, Error);
@@ -930,6 +943,19 @@ UAnimStateTransitionNode* FAnimStateMachineEditor::FindTransitionById(
 		if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(Node))
 		{
 			if (GetNodeId(TransNode) == NodeId)
+			{
+				return TransNode;
+			}
+		}
+	}
+
+	// Fallback: match by UObject name so IDs returned by read-only serialize
+	// paths (GetNodeIdOrName) resolve back to the source transition node.
+	for (UEdGraphNode* Node : SMGraph->Nodes)
+	{
+		if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(Node))
+		{
+			if (TransNode->GetName() == NodeId)
 			{
 				return TransNode;
 			}
@@ -1031,7 +1057,8 @@ TSharedPtr<FJsonObject> FAnimStateMachineEditor::SerializeStateMachineInfo(
 	if (!StateMachine) return Json;
 
 	Json->SetStringField(TEXT("name"), StateMachine->GetStateMachineName());
-	Json->SetStringField(TEXT("node_id"), GetNodeId(StateMachine));
+	// Resolvable ID for pre-existing state-machine nodes without mutating NodeComment.
+	Json->SetStringField(TEXT("node_id"), GetNodeIdOrName(StateMachine));
 
 	// Add state list
 	TArray<TSharedPtr<FJsonValue>> StatesArray;
@@ -1052,7 +1079,8 @@ TSharedPtr<FJsonObject> FAnimStateMachineEditor::SerializeStateInfo(UAnimStateNo
 	if (!State) return Json;
 
 	Json->SetStringField(TEXT("name"), State->GetStateName());
-	Json->SetStringField(TEXT("node_id"), GetNodeId(State));
+	// Resolvable ID for pre-existing state nodes without mutating NodeComment.
+	Json->SetStringField(TEXT("node_id"), GetNodeIdOrName(State));
 	Json->SetNumberField(TEXT("pos_x"), State->NodePosX);
 	Json->SetNumberField(TEXT("pos_y"), State->NodePosY);
 
@@ -1065,7 +1093,8 @@ TSharedPtr<FJsonObject> FAnimStateMachineEditor::SerializeTransitionInfo(UAnimSt
 
 	if (!Transition) return Json;
 
-	Json->SetStringField(TEXT("node_id"), GetNodeId(Transition));
+	// Resolvable ID for pre-existing transition nodes without mutating NodeComment.
+	Json->SetStringField(TEXT("node_id"), GetNodeIdOrName(Transition));
 	Json->SetNumberField(TEXT("duration"), Transition->CrossfadeDuration);
 	Json->SetNumberField(TEXT("priority"), Transition->PriorityOrder);
 
@@ -1158,6 +1187,24 @@ FString FAnimStateMachineEditor::GetNodeId(UEdGraphNode* Node)
 		return Node->NodeComment.Mid(NodeIdPrefix.Len());
 	}
 	return FString();
+}
+
+FString FAnimStateMachineEditor::GetNodeIdOrName(UEdGraphNode* Node)
+{
+	if (!Node)
+	{
+		return FString();
+	}
+
+	const FString McpId = GetNodeId(Node);
+	if (!McpId.IsEmpty())
+	{
+		return McpId;
+	}
+
+	// UObject name is stable for a live node and resolvable by
+	// FindStateById / FindTransitionById via their fallback branches.
+	return Node->GetName();
 }
 
 // ===== Private Helpers =====

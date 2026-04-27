@@ -185,6 +185,62 @@ public:
 	 */
 	static TSharedPtr<FJsonObject> SerializeNodeInfo(UEdGraphNode* Node);
 
+	// ===== Graph-Level Operations =====
+
+	/**
+	 * Assign MCP IDs to all nodes that don't have one
+	 * Makes pre-existing Blueprint nodes referenceable by MCP tools
+	 * @param Graph - Graph to process
+	 */
+	static void AssignTemporaryIds(UEdGraph* Graph);
+
+	/**
+	 * Serialize all nodes in a graph with full pin/connection detail.
+	 * Read-only: does not modify the graph. Node IDs in the output fall back to
+	 * the node's UObject name when no MCP_ID has been assigned by a prior modify op.
+	 * @param Graph - Graph to serialize
+	 * @return JSON with node_count, nodes array, and connections array
+	 */
+	static TSharedPtr<FJsonObject> SerializeAllNodes(UEdGraph* Graph);
+
+	/**
+	 * Remove nodes from a function graph
+	 * @param Graph - Function graph to clear
+	 * @param OutError - Error message if failed
+	 * @param bPreserveEntryResult - true to keep FunctionEntry/FunctionResult, false to remove all
+	 * @return true if successful
+	 */
+	static bool ClearFunctionBody(UEdGraph* Graph, FString& OutError, bool bPreserveEntryResult = true);
+
+	/**
+	 * Export all graph nodes to UE clipboard text format
+	 * Uses FEdGraphUtilities::ExportNodesToText
+	 * @param Graph - Graph to export
+	 * @param OutText - Exported clipboard text
+	 * @param OutError - Error message if failed
+	 * @return true if successful
+	 */
+	static bool ExportGraphToText(UEdGraph* Graph, FString& OutText, FString& OutError);
+
+	/**
+	 * Import nodes from UE clipboard text format
+	 * Uses FEdGraphUtilities::ImportNodesFromText
+	 * @param Graph - Target graph
+	 * @param Text - Clipboard text to import
+	 * @param OutImportedNodes - Array of imported nodes
+	 * @param OutError - Error message if failed
+	 * @return true if successful
+	 */
+	static bool ImportGraphFromText(UEdGraph* Graph, const FString& Text, TArray<UEdGraphNode*>& OutImportedNodes, FString& OutError);
+
+	/**
+	 * Save Blueprint asset to disk
+	 * @param Blueprint - Blueprint to save
+	 * @param OutError - Error message if failed
+	 * @return true if successful
+	 */
+	static bool SaveBlueprint(UBlueprint* Blueprint, FString& OutError);
+
 	// ===== Node ID System =====
 
 	/**
@@ -209,6 +265,16 @@ public:
 	 * @return Node ID or empty string
 	 */
 	static FString GetNodeId(UEdGraphNode* Node);
+
+	/**
+	 * Read-only ID resolver. Returns the stored MCP_ID if present, otherwise
+	 * falls back to the node's UObject name (e.g., "K2Node_Event_0"). Used by
+	 * serialize paths so pre-existing nodes can be referenced without writing
+	 * to Node->NodeComment. FindNodeById already resolves UObject-name IDs.
+	 * @param Node - Node to query
+	 * @return Stable ID string suitable for FindNodeById
+	 */
+	static FString GetNodeIdOrName(UEdGraphNode* Node);
 
 private:
 	// Thread-safe counter for unique IDs

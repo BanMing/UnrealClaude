@@ -21,6 +21,10 @@ namespace BlueprintModifyOps
 	static const FString ConnectPins = TEXT("connect_pins");
 	static const FString DisconnectPins = TEXT("disconnect_pins");
 	static const FString SetPinValue = TEXT("set_pin_value");
+	static const FString ExportFunction = TEXT("export_function");
+	static const FString ImportNodes = TEXT("import_nodes");
+	static const FString ReplaceFunctionBody = TEXT("replace_function_body");
+	static const FString BatchModify = TEXT("batch_modify");
 }
 
 FMCPToolResult FMCPTool_BlueprintModify::Execute(const TSharedRef<FJsonObject>& Params)
@@ -82,9 +86,27 @@ FMCPToolResult FMCPTool_BlueprintModify::Execute(const TSharedRef<FJsonObject>& 
 	{
 		return ExecuteSetPinValue(Params);
 	}
+	// Level 5: Graph I/O Operations
+	if (Operation == BlueprintModifyOps::ExportFunction)
+	{
+		return ExecuteExportFunction(Params);
+	}
+	if (Operation == BlueprintModifyOps::ImportNodes)
+	{
+		return ExecuteImportNodes(Params);
+	}
+	if (Operation == BlueprintModifyOps::ReplaceFunctionBody)
+	{
+		return ExecuteReplaceFunctionBody(Params);
+	}
+	// Level 6: Batch Operations
+	if (Operation == BlueprintModifyOps::BatchModify)
+	{
+		return ExecuteBatchModify(Params);
+	}
 
 	return FMCPToolResult::Error(FString::Printf(
-		TEXT("Unknown operation: '%s'. Valid: create, add_variable, remove_variable, add_function, remove_function, add_node, add_nodes, delete_node, connect_pins, disconnect_pins, set_pin_value"),
+		TEXT("Unknown operation: '%s'. Valid: create, add_variable, remove_variable, add_function, remove_function, add_node, add_nodes, delete_node, connect_pins, disconnect_pins, set_pin_value, export_function, import_nodes, replace_function_body, batch_modify"),
 		*Operation));
 }
 
@@ -913,4 +935,403 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteSetPinValue(const TSharedRef<FJs
 		FString::Printf(TEXT("Set '%s.%s' = '%s'"), *NodeId, *PinName, *PinValue),
 		ResultData
 	);
+}
+
+// ===== Level 5: Graph I/O Operations =====
+
+FMCPToolResult FMCPTool_BlueprintModify::ExecuteExportFunction(const TSharedRef<FJsonObject>& Params)
+{
+	FString GraphName = ExtractOptionalString(Params, TEXT("graph_name"), TEXT(""));
+	bool bFunctionGraph = ExtractOptionalBool(Params, TEXT("is_function_graph"), true);
+
+	// Load Blueprint (query mode - no editability check needed for export)
+	FMCPBlueprintLoadContext Context;
+	if (auto LoadError = Context.LoadForQuery(Params))
+	{
+		return LoadError.GetValue();
+	}
+
+	// Find graph
+	FString GraphError;
+	UEdGraph* Graph = FBlueprintGraphEditor::FindGraph(Context.Blueprint, GraphName, bFunctionGraph, GraphError);
+	if (!Graph)
+	{
+		return FMCPToolResult::Error(GraphError);
+	}
+
+	// Export to clipboard text
+	FString ExportedText;
+	FString ExportError;
+	if (!FBlueprintGraphEditor::ExportGraphToText(Graph, ExportedText, ExportError))
+	{
+		return FMCPToolResult::Error(ExportError);
+	}
+
+	// Build result
+	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
+	ResultData->SetStringField(TEXT("blueprint_path"), Context.Blueprint->GetPathName());
+	ResultData->SetStringField(TEXT("graph_name"), Graph->GetName());
+	ResultData->SetStringField(TEXT("clipboard_text"), ExportedText);
+	ResultData->SetNumberField(TEXT("text_length"), ExportedText.Len());
+	ResultData->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Exported function '%s' (%d nodes, %d chars)"),
+			*Graph->GetName(), Graph->Nodes.Num(), ExportedText.Len()),
+		ResultData
+	);
+}
+
+FMCPToolResult FMCPTool_BlueprintModify::ExecuteImportNodes(const TSharedRef<FJsonObject>& Params)
+{
+	TOptional<FMCPToolResult> Error;
+	FString ClipboardText;
+	if (!ExtractRequiredString(Params, TEXT("clipboard_text"), ClipboardText, Error))
+	{
+		return Error.GetValue();
+	}
+
+	FString GraphName = ExtractOptionalString(Params, TEXT("graph_name"), TEXT(""));
+	bool bFunctionGraph = ExtractOptionalBool(Params, TEXT("is_function_graph"), true);
+	bool bSave = ExtractOptionalBool(Params, TEXT("save"), true);
+
+	// Load and validate Blueprint
+	FMCPBlueprintLoadContext Context;
+	if (auto LoadError = Context.LoadAndValidate(Params))
+	{
+		return LoadError.GetValue();
+	}
+
+	// Find graph
+	FString GraphError;
+	UEdGraph* Graph = FBlueprintGraphEditor::FindGraph(Context.Blueprint, GraphName, bFunctionGraph, GraphError);
+	if (!Graph)
+	{
+		return FMCPToolResult::Error(GraphError);
+	}
+
+	// Import nodes from clipboard text
+	TArray<UEdGraphNode*> ImportedNodes;
+	FString ImportError;
+	if (!FBlueprintGraphEditor::ImportGraphFromText(Graph, ClipboardText, ImportedNodes, ImportError))
+	{
+		return FMCPToolResult::Error(ImportError);
+	}
+
+	// Compile and finalize
+	if (auto CompileError = Context.CompileAndFinalize(TEXT("Nodes imported")))
+	{
+		return CompileError.GetValue();
+	}
+
+	// Save if requested
+	if (bSave)
+	{
+		FString SaveError;
+		if (!FBlueprintGraphEditor::SaveBlueprint(Context.Blueprint, SaveError))
+		{
+			// Not fatal - compilation succeeded, save failed
+			UE_LOG(LogUnrealClaude, Warning, TEXT("Blueprint compiled but save failed: %s"), *SaveError);
+		}
+	}
+
+	// Build result
+	TSharedPtr<FJsonObject> ResultData = Context.BuildResultJson();
+	ResultData->SetStringField(TEXT("graph_name"), Graph->GetName());
+	ResultData->SetNumberField(TEXT("imported_node_count"), ImportedNodes.Num());
+	ResultData->SetBoolField(TEXT("saved"), bSave);
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Imported %d nodes into '%s'"), ImportedNodes.Num(), *Graph->GetName()),
+		ResultData
+	);
+}
+
+FMCPToolResult FMCPTool_BlueprintModify::ExecuteReplaceFunctionBody(const TSharedRef<FJsonObject>& Params)
+{
+	TOptional<FMCPToolResult> Error;
+	FString ClipboardText;
+	if (!ExtractRequiredString(Params, TEXT("clipboard_text"), ClipboardText, Error))
+	{
+		return Error.GetValue();
+	}
+
+	FString GraphName;
+	if (!ExtractRequiredString(Params, TEXT("graph_name"), GraphName, Error))
+	{
+		return Error.GetValue();
+	}
+
+	bool bFunctionGraph = ExtractOptionalBool(Params, TEXT("is_function_graph"), true);
+	bool bSave = ExtractOptionalBool(Params, TEXT("save"), true);
+
+	// Load and validate Blueprint
+	FMCPBlueprintLoadContext Context;
+	if (auto LoadError = Context.LoadAndValidate(Params))
+	{
+		return LoadError.GetValue();
+	}
+
+	// Find graph
+	FString GraphError;
+	UEdGraph* Graph = FBlueprintGraphEditor::FindGraph(Context.Blueprint, GraphName, bFunctionGraph, GraphError);
+	if (!Graph)
+	{
+		return FMCPToolResult::Error(GraphError);
+	}
+
+	int32 OriginalNodeCount = Graph->Nodes.Num();
+
+	// Step 1: Clear all nodes (including Entry/Result) for clean roundtrip
+	FString ClearError;
+	if (!FBlueprintGraphEditor::ClearFunctionBody(Graph, ClearError, /*bPreserveEntryResult=*/ false))
+	{
+		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to clear function body: %s"), *ClearError));
+	}
+
+	int32 PreservedNodeCount = Graph->Nodes.Num();
+
+	// Step 2: Import new nodes from clipboard text
+	TArray<UEdGraphNode*> ImportedNodes;
+	FString ImportError;
+	if (!FBlueprintGraphEditor::ImportGraphFromText(Graph, ClipboardText, ImportedNodes, ImportError))
+	{
+		return FMCPToolResult::Error(FString::Printf(TEXT("Body cleared but import failed: %s"), *ImportError));
+	}
+
+	// Step 3: Compile and finalize
+	if (auto CompileError = Context.CompileAndFinalize(TEXT("Function body replaced")))
+	{
+		return CompileError.GetValue();
+	}
+
+	// Step 4: Save if requested
+	if (bSave)
+	{
+		FString SaveError;
+		if (!FBlueprintGraphEditor::SaveBlueprint(Context.Blueprint, SaveError))
+		{
+			UE_LOG(LogUnrealClaude, Warning, TEXT("Blueprint compiled but save failed: %s"), *SaveError);
+		}
+	}
+
+	// Build result
+	TSharedPtr<FJsonObject> ResultData = Context.BuildResultJson();
+	ResultData->SetStringField(TEXT("graph_name"), Graph->GetName());
+	ResultData->SetNumberField(TEXT("original_node_count"), OriginalNodeCount);
+	ResultData->SetNumberField(TEXT("preserved_node_count"), PreservedNodeCount);
+	ResultData->SetNumberField(TEXT("imported_node_count"), ImportedNodes.Num());
+	ResultData->SetNumberField(TEXT("final_node_count"), Graph->Nodes.Num());
+	ResultData->SetBoolField(TEXT("saved"), bSave);
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Replaced function '%s': %d nodes removed, %d imported"),
+			*Graph->GetName(), OriginalNodeCount - PreservedNodeCount, ImportedNodes.Num()),
+		ResultData
+	);
+}
+
+// ===== Level 6: Batch Operations =====
+
+FMCPToolResult FMCPTool_BlueprintModify::ExecuteBatchModify(const TSharedRef<FJsonObject>& Params)
+{
+	// Validate that the steps array was provided
+	const TArray<TSharedPtr<FJsonValue>>* StepsArray;
+	if (!Params->TryGetArrayField(TEXT("steps"), StepsArray))
+	{
+		return FMCPToolResult::Error(TEXT("'steps' array is required for batch_modify"));
+	}
+
+	FString GraphName = ExtractOptionalString(Params, TEXT("graph_name"), TEXT(""));
+	bool bFunctionGraph = ExtractOptionalBool(Params, TEXT("is_function_graph"), true);
+	bool bSave = ExtractOptionalBool(Params, TEXT("save"), true);
+
+	// Load and validate Blueprint
+	FMCPBlueprintLoadContext Context;
+	if (auto LoadError = Context.LoadAndValidate(Params))
+	{
+		return LoadError.GetValue();
+	}
+
+	// Find graph
+	FString GraphError;
+	UEdGraph* Graph = FBlueprintGraphEditor::FindGraph(Context.Blueprint, GraphName, bFunctionGraph, GraphError);
+	if (!Graph)
+	{
+		return FMCPToolResult::Error(GraphError);
+	}
+
+	// Track node IDs created in each step so later steps can reference them via "$N"
+	TArray<FString> CreatedNodeIds;
+	CreatedNodeIds.SetNum(StepsArray->Num());
+
+	int32 SuccessCount = 0;
+	TArray<TSharedPtr<FJsonValue>> StepResults;
+
+	for (int32 i = 0; i < StepsArray->Num(); i++)
+	{
+		const TSharedPtr<FJsonObject>* StepObj;
+		if (!(*StepsArray)[i]->TryGetObject(StepObj))
+		{
+			TSharedPtr<FJsonObject> ErrResult = MakeShared<FJsonObject>();
+			ErrResult->SetNumberField(TEXT("step"), i);
+			ErrResult->SetStringField(TEXT("error"), TEXT("Invalid step object"));
+			StepResults.Add(MakeShared<FJsonValueObject>(ErrResult));
+			continue;
+		}
+
+		FString Op = (*StepObj)->GetStringField(TEXT("op")).ToLower();
+		FString StepError;
+		bool bStepSuccess = false;
+		FString StepNodeId;
+
+		if (Op == TEXT("disconnect"))
+		{
+			// Disconnect two pins; source/target node refs support "$N" step references
+			FString SrcNode = ResolveStepRef((*StepObj)->GetStringField(TEXT("source_node")), CreatedNodeIds);
+			FString SrcPin  = (*StepObj)->GetStringField(TEXT("source_pin"));
+			FString TgtNode = ResolveStepRef((*StepObj)->GetStringField(TEXT("target_node")), CreatedNodeIds);
+			FString TgtPin  = (*StepObj)->GetStringField(TEXT("target_pin"));
+			bStepSuccess = FBlueprintGraphEditor::DisconnectPins(Graph, SrcNode, SrcPin, TgtNode, TgtPin, StepError);
+		}
+		else if (Op == TEXT("connect"))
+		{
+			// Connect two pins; source/target node refs support "$N" step references
+			FString SrcNode = ResolveStepRef((*StepObj)->GetStringField(TEXT("source_node")), CreatedNodeIds);
+			FString SrcPin  = (*StepObj)->GetStringField(TEXT("source_pin"));
+			FString TgtNode = ResolveStepRef((*StepObj)->GetStringField(TEXT("target_node")), CreatedNodeIds);
+			FString TgtPin  = (*StepObj)->GetStringField(TEXT("target_pin"));
+			bStepSuccess = FBlueprintGraphEditor::ConnectPins(Graph, SrcNode, SrcPin, TgtNode, TgtPin, StepError);
+		}
+		else if (Op == TEXT("delete_node"))
+		{
+			// Delete a node by ID; supports "$N" step references
+			FString NodeId = ResolveStepRef((*StepObj)->GetStringField(TEXT("node_id")), CreatedNodeIds);
+			bStepSuccess = FBlueprintGraphEditor::DeleteNode(Graph, NodeId, StepError);
+		}
+		else if (Op == TEXT("add_node"))
+		{
+			// Create a node; records new node ID in CreatedNodeIds[i] for downstream "$i" references
+			FString NodeType = (*StepObj)->GetStringField(TEXT("node_type"));
+			int32 PosX = (int32)(*StepObj)->GetNumberField(TEXT("pos_x"));
+			int32 PosY = (int32)(*StepObj)->GetNumberField(TEXT("pos_y"));
+
+			TSharedPtr<FJsonObject> NodeParams;
+			const TSharedPtr<FJsonObject>* ParamsPtr;
+			if ((*StepObj)->TryGetObjectField(TEXT("params"), ParamsPtr))
+			{
+				NodeParams = *ParamsPtr;
+			}
+
+			FString NodeId;
+			UEdGraphNode* NewNode = FBlueprintGraphEditor::CreateNode(Graph, NodeType, NodeParams, PosX, PosY, NodeId, StepError);
+			if (NewNode)
+			{
+				bStepSuccess = true;
+				StepNodeId = NodeId;
+				CreatedNodeIds[i] = NodeId;
+
+				// Apply inline pin_values if provided inside the params object
+				if (NodeParams.IsValid())
+				{
+					const TSharedPtr<FJsonObject>* PinValuesPtr;
+					if (NodeParams->TryGetObjectField(TEXT("pin_values"), PinValuesPtr))
+					{
+						for (const auto& PinValue : (*PinValuesPtr)->Values)
+						{
+							FString PinValueStr;
+							if (PinValue.Value->TryGetString(PinValueStr))
+							{
+								FString PinError;
+								FBlueprintGraphEditor::SetPinDefaultValue(Graph, NodeId, PinValue.Key, PinValueStr, PinError);
+							}
+						}
+					}
+				}
+			}
+		}
+		else if (Op == TEXT("set_pin_value"))
+		{
+			// Set a pin's default value; node_id supports "$N" step references
+			FString NodeId   = ResolveStepRef((*StepObj)->GetStringField(TEXT("node_id")), CreatedNodeIds);
+			FString PinName  = (*StepObj)->GetStringField(TEXT("pin_name"));
+			FString PinValue = (*StepObj)->GetStringField(TEXT("value"));
+			bStepSuccess = FBlueprintGraphEditor::SetPinDefaultValue(Graph, NodeId, PinName, PinValue, StepError);
+		}
+		else
+		{
+			StepError = FString::Printf(
+				TEXT("Unknown batch op: '%s'. Valid: disconnect, connect, delete_node, add_node, set_pin_value"),
+				*Op);
+		}
+
+		// Record individual step outcome
+		TSharedPtr<FJsonObject> StepResult = MakeShared<FJsonObject>();
+		StepResult->SetNumberField(TEXT("step"), i);
+		StepResult->SetStringField(TEXT("op"), Op);
+		StepResult->SetBoolField(TEXT("success"), bStepSuccess);
+		if (!StepNodeId.IsEmpty())
+		{
+			StepResult->SetStringField(TEXT("node_id"), StepNodeId);
+		}
+		if (!bStepSuccess && !StepError.IsEmpty())
+		{
+			StepResult->SetStringField(TEXT("error"), StepError);
+		}
+		StepResults.Add(MakeShared<FJsonValueObject>(StepResult));
+
+		if (bStepSuccess)
+		{
+			SuccessCount++;
+		}
+	}
+
+	// Compile Blueprint once after all steps complete
+	if (auto CompileError = Context.CompileAndFinalize(TEXT("Batch modify")))
+	{
+		return CompileError.GetValue();
+	}
+
+	// Save if requested (non-fatal on failure — compilation already succeeded)
+	if (bSave)
+	{
+		FString SaveError;
+		if (!FBlueprintGraphEditor::SaveBlueprint(Context.Blueprint, SaveError))
+		{
+			UE_LOG(LogUnrealClaude, Warning, TEXT("Batch compiled but save failed: %s"), *SaveError);
+		}
+	}
+
+	// Build aggregate result
+	TSharedPtr<FJsonObject> ResultData = Context.BuildResultJson();
+	ResultData->SetStringField(TEXT("graph_name"), Graph->GetName());
+	ResultData->SetNumberField(TEXT("total_steps"), StepsArray->Num());
+	ResultData->SetNumberField(TEXT("success_count"), SuccessCount);
+	ResultData->SetNumberField(TEXT("fail_count"), StepsArray->Num() - SuccessCount);
+	ResultData->SetArrayField(TEXT("step_results"), StepResults);
+	ResultData->SetBoolField(TEXT("saved"), bSave);
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Batch modify: %d/%d steps succeeded"), SuccessCount, StepsArray->Num()),
+		ResultData
+	);
+}
+
+FString FMCPTool_BlueprintModify::ResolveStepRef(const FString& NodeRef, const TArray<FString>& CreatedNodeIds) const
+{
+	// Strings like "$0", "$1" are resolved to the node ID created by that step index.
+	// If the index is out of range or that step created no node, the original string is returned unchanged.
+	if (NodeRef.StartsWith(TEXT("$")))
+	{
+		FString IndexStr = NodeRef.RightChop(1);
+		if (IndexStr.IsNumeric())
+		{
+			int32 Index = FCString::Atoi(*IndexStr);
+			if (Index >= 0 && Index < CreatedNodeIds.Num() && !CreatedNodeIds[Index].IsEmpty())
+			{
+				return CreatedNodeIds[Index];
+			}
+		}
+	}
+	return NodeRef;
 }

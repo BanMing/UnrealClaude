@@ -154,17 +154,13 @@ UEdGraphNode* FAnimGraphEditor::FindNodeById(UEdGraph* Graph, const FString& Nod
 		}
 	}
 
-	// Fallback: match against the native NodeGuid so pre-existing nodes
-	// (not created by MCP) are also reachable by ID for modify ops.
-	FGuid ParsedGuid;
-	if (FGuid::Parse(NodeId, ParsedGuid))
+	// Fallback: match by UObject name so IDs returned by read-only serialize
+	// paths (GetNodeIdOrName) can be resolved back to the source node.
+	for (UEdGraphNode* Node : Graph->Nodes)
 	{
-		for (UEdGraphNode* Node : Graph->Nodes)
+		if (Node && Node->GetName() == NodeId)
 		{
-			if (Node && Node->NodeGuid == ParsedGuid)
-			{
-				return Node;
-			}
+			return Node;
 		}
 	}
 
@@ -251,13 +247,32 @@ FString FAnimGraphEditor::GetNodeId(UEdGraphNode* Node)
 	return FString();
 }
 
+FString FAnimGraphEditor::GetNodeIdOrName(UEdGraphNode* Node)
+{
+	if (!Node)
+	{
+		return FString();
+	}
+
+	const FString McpId = GetNodeId(Node);
+	if (!McpId.IsEmpty())
+	{
+		return McpId;
+	}
+
+	// UObject name is stable for a live node and resolvable by FindNodeById.
+	return Node->GetName();
+}
+
 TSharedPtr<FJsonObject> FAnimGraphEditor::SerializeAnimNodeInfo(UEdGraphNode* Node)
 {
 	TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
 
 	if (!Node) return Json;
 
-	Json->SetStringField(TEXT("node_id"), GetNodeId(Node));
+	// Use GetNodeIdOrName so pre-existing nodes get a resolvable ID without
+	// mutating NodeComment.
+	Json->SetStringField(TEXT("node_id"), GetNodeIdOrName(Node));
 	Json->SetStringField(TEXT("node_class"), Node->GetClass()->GetName());
 	Json->SetNumberField(TEXT("pos_x"), Node->NodePosX);
 	Json->SetNumberField(TEXT("pos_y"), Node->NodePosY);
@@ -470,7 +485,9 @@ TSharedPtr<FJsonObject> FAnimGraphEditor::SerializeDetailedPinInfo(UEdGraphPin* 
 			if (LinkedPin && LinkedPin->GetOwningNode())
 			{
 				TSharedPtr<FJsonObject> LinkObj = MakeShared<FJsonObject>();
-				LinkObj->SetStringField(TEXT("node_id"), GetNodeId(LinkedPin->GetOwningNode()));
+				// Use GetNodeIdOrName for linked-node IDs so read-only callers
+				// receive a resolvable ID even on un-tagged nodes.
+				LinkObj->SetStringField(TEXT("node_id"), GetNodeIdOrName(LinkedPin->GetOwningNode()));
 				LinkObj->SetStringField(TEXT("pin_name"), LinkedPin->PinName.ToString());
 				ConnectedTo.Add(MakeShared<FJsonValueObject>(LinkObj));
 			}
@@ -507,8 +524,10 @@ TSharedPtr<FJsonObject> FAnimGraphEditor::GetTransitionGraphNodes(
 		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
 
 		// Basic node info
-		FString NodeId = GetNodeId(Node);
-		NodeObj->SetStringField(TEXT("node_id"), NodeId.IsEmpty() ? TEXT("(unnamed)") : NodeId);
+		// Fall back to UObject name instead of "(unnamed)" so callers get an
+		// ID they can use with FindNodeById on pre-existing nodes.
+		FString NodeId = GetNodeIdOrName(Node);
+		NodeObj->SetStringField(TEXT("node_id"), NodeId);
 		NodeObj->SetStringField(TEXT("node_class"), Node->GetClass()->GetName());
 		NodeObj->SetStringField(TEXT("node_title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
 		NodeObj->SetNumberField(TEXT("pos_x"), Node->NodePosX);

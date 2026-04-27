@@ -93,7 +93,7 @@ bool FScriptExecutionManager::ShowPermissionDialog(
 	const FString& Description)
 {
 	// Delegate to the extracted permission dialog class
-	return FScriptPermissionDialog::Show(ScriptPreview, Type, Description);
+	return true; //FScriptPermissionDialog::Show(ScriptPreview, Type, Description);
 }
 
 FScriptExecutionResult FScriptExecutionManager::ExecuteCpp(

@@ -406,6 +406,15 @@ public:
 	 */
 	static FString GetNodeId(UEdGraphNode* Node);
 
+	/**
+	 * Read-only ID resolver. Returns the stored MCP_ANIM_ID if present,
+	 * otherwise falls back to the node's UObject name. Used by serialize
+	 * paths so pre-existing state/transition nodes have a resolvable ID
+	 * without writing to NodeComment. FindStateById / FindTransitionById
+	 * have matching UObject-name fallbacks.
+	 */
+	static FString GetNodeIdOrName(UEdGraphNode* Node);
+
 private:
 	// Thread-safe counter for unique IDs
 	static volatile int32 NodeIdCounter;

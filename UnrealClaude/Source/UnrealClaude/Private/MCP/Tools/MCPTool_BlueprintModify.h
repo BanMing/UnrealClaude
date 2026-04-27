@@ -25,6 +25,14 @@
  *   - disconnect_pins: Disconnect two pins
  *   - set_pin_value: Set default value for an input pin
  *
+ * Level 5 Operations (Graph I/O):
+ *   - export_function: Export function graph as clipboard text
+ *   - import_nodes: Import nodes from clipboard text
+ *   - replace_function_body: Clear and replace function body atomically
+ *
+ * Level 6 Operations (Batch):
+ *   - batch_modify: Execute multiple modification steps atomically
+ *
  * All modification operations auto-compile the Blueprint after changes.
  */
 class FMCPTool_BlueprintModify : public FMCPToolBase
@@ -39,7 +47,9 @@ public:
 			"Complexity Levels:\n"
 			"Level 2 (Structure): 'create', 'add_variable', 'remove_variable', 'add_function', 'remove_function'\n"
 			"Level 3 (Nodes): 'add_node', 'add_nodes' (batch), 'delete_node'\n"
-			"Level 4 (Wiring): 'connect_pins', 'disconnect_pins', 'set_pin_value'\n\n"
+			"Level 4 (Wiring): 'connect_pins', 'disconnect_pins', 'set_pin_value'\n"
+			"Level 5 (Graph I/O): 'export_function', 'import_nodes', 'replace_function_body'\n"
+			"Level 6 (Batch): 'batch_modify'\n\n"
 			"Workflow: Use blueprint_query first to understand existing structure, then modify.\n\n"
 			"Node types: CallFunction, Branch, Event, VariableGet, VariableSet, Sequence, "
 			"PrintString, Add, Subtract, Multiply, Divide\n\n"
@@ -111,7 +121,17 @@ public:
 			FMCPToolParameter(TEXT("pin_name"), TEXT("string"),
 				TEXT("Pin name to set value"), false),
 			FMCPToolParameter(TEXT("pin_value"), TEXT("string"),
-				TEXT("Default value to set"), false)
+				TEXT("Default value to set"), false),
+
+			// For export_function / import_nodes / replace_function_body
+			FMCPToolParameter(TEXT("clipboard_text"), TEXT("string"),
+				TEXT("Node clipboard text for import operations"), false),
+			FMCPToolParameter(TEXT("save"), TEXT("boolean"),
+				TEXT("Save Blueprint to disk after modification (default: true)"), false, TEXT("true")),
+
+			// For batch_modify operation (Level 6)
+			FMCPToolParameter(TEXT("steps"), TEXT("array"),
+				TEXT("Array of modification steps for batch_modify. Each step: {op, ...params}"), false)
 		};
 		Info.Annotations = FMCPToolAnnotations::Modifying();
 		return Info;
@@ -137,6 +157,14 @@ private:
 	FMCPToolResult ExecuteDisconnectPins(const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult ExecuteSetPinValue(const TSharedRef<FJsonObject>& Params);
 
+	// Level 5 Operations (Graph I/O)
+	FMCPToolResult ExecuteExportFunction(const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult ExecuteImportNodes(const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult ExecuteReplaceFunctionBody(const TSharedRef<FJsonObject>& Params);
+
+	// Level 6 Operations (Batch)
+	FMCPToolResult ExecuteBatchModify(const TSharedRef<FJsonObject>& Params);
+
 	// Helpers
 	EBlueprintType ParseBlueprintType(const FString& TypeString);
 
@@ -154,4 +182,7 @@ private:
 		const TArray<TSharedPtr<FJsonValue>>& ConnectionsArray,
 		const TArray<FString>& CreatedNodeIds
 	);
+
+	// batch_modify helper: resolves "$N" step-index references to created node IDs
+	FString ResolveStepRef(const FString& NodeRef, const TArray<FString>& CreatedNodeIds) const;
 };
