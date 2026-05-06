@@ -153,7 +153,7 @@ namespace UnrealClaudeConstants
 	namespace MCPServer
 	{
 		/** Default port for MCP HTTP server */
-		constexpr uint32 DefaultPort = 3000;
+		constexpr uint32 DefaultPort = 8765;
 
 		/** Timeout for game thread execution in milliseconds */
 		constexpr uint32 GameThreadTimeoutMs = 30000;

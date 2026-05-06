@@ -228,7 +228,7 @@ UnrealClaude automatically gathers information about your project:
 
 ### MCP Server
 
-The plugin includes a Model Context Protocol (MCP) server with 20+ tools that expose editor functionality to Claude and external tools. The MCP server runs on port 3000 by default and starts automatically when the editor loads.
+The plugin includes a Model Context Protocol (MCP) server with 20+ tools that expose editor functionality to Claude and external tools. The MCP server runs on port 8765 by default and starts automatically when the editor loads.
 
 **Tool Categories:**
 - **Actor Tools** - Spawn, move, delete, inspect, and set properties on actors
@@ -320,7 +320,7 @@ Ensure you're on Unreal Engine 5.7. Supported platforms are Windows (Win64), Lin
 
 ### MCP Server not starting
 
-Check if port 3000 is available. The MCP server logs to `LogUnrealClaude`.
+Check if port 8765 is available. The MCP server logs to `LogUnrealClaude`.
 
 ### MCP tools not available / Blueprint tools not working
 
@@ -334,12 +334,12 @@ If Claude says the MCP tools are in its instructions but not in its function lis
 
 2. **Verify the HTTP server is running**: With the editor open, test:
    ```bash
-   curl http://localhost:3000/mcp/status
+   curl http://localhost:8765/mcp/status
    ```
    You should see a JSON response with project info.
 
 3. **Check the Output Log**: Look for `LogUnrealClaude` messages:
-   - `MCP Server started on http://localhost:3000` - Server is running
+   - `MCP Server started on http://localhost:8765` - Server is running
    - `Registered X MCP tools` - Tools are loaded
 
 4. **Restart the editor**: After installing npm dependencies, restart Unreal Editor.
