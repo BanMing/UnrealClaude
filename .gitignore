@@ -36,6 +36,8 @@ yarn-error.log
 # Claude Code session data
 .claude/
 CLAUDE.md
+production/session-logs/
+production/session-state/
 
 # macOS
 .DS_Store
