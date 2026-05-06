@@ -27,6 +27,7 @@
 #include "Tools/MCPTool_EnhancedInput.h"
 #include "Tools/MCPTool_Character.h"
 #include "Tools/MCPTool_CharacterData.h"
+#include "Tools/MCPTool_GenericDataTable.h"
 #include "Tools/MCPTool_Material.h"
 #include "Tools/MCPTool_Asset.h"
 #include "Tools/MCPTool_OpenLevel.h"
@@ -102,6 +103,7 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 	// Character tools
 	RegisterTool(MakeShared<FMCPTool_Character>());
 	RegisterTool(MakeShared<FMCPTool_CharacterData>());
+	RegisterTool(MakeShared<FMCPTool_GenericDataTable>());
 
 	// Material and Asset tools
 	RegisterTool(MakeShared<FMCPTool_Material>());
