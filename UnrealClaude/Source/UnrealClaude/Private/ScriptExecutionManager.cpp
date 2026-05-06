@@ -769,6 +769,6 @@ FString FScriptExecutionManager::GetCppScriptDirectory() const
 
 FString FScriptExecutionManager::GetContentScriptDirectory() const
 {
-	// Content/UnrealClaude/Scripts/
-	return FPaths::Combine(FPaths::ProjectContentDir(), TEXT("UnrealClaude"), TEXT("Scripts"));
+	// <ProjectRoot>/Scripts/
+	return FPaths::Combine(FPaths::ProjectDir(), TEXT("Scripts"));
 }
