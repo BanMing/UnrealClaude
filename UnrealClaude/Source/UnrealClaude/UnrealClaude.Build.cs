@@ -67,7 +67,19 @@ public class UnrealClaude : ModuleRules
 				"MaterialEditor",
 				// UMG animation / Sequencer (Story 3)
 				"MovieScene",
-				"MovieSceneTracks"
+				"MovieSceneTracks",
+				// PR-B: UMG session anchor subsystem
+				"EditorSubsystem",
+				// PR-E: StateTree tool family (yes-ue-mcp MIT, adapted)
+				"StateTreeModule",
+				"StateTreeEditorModule",
+				// PR-G: Niagara tool family ()
+				"Niagara",
+				"NiagaraEditor",
+				// PR-G: GAS tool family ()
+				"GameplayAbilities",
+				"GameplayTags",
+				"GameplayTasks"
 			}
 		);
 

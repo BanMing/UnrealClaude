@@ -4,7 +4,7 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat&logo=c%2B%2B&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Win64%20%7C%20Linux%20%7C%20Mac-0078D6?style=flat&logo=windows&logoColor=white)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-Integration-D97757?style=flat&logo=anthropic&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-30%2B%20Tools-8A2BE2?style=flat)
+![MCP](https://img.shields.io/badge/MCP-46%20Tools-8A2BE2?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat)
 
 **Claude Code CLI integration for Unreal Engine 5.7** - Get AI coding assistance with built-in UE5.7 documentation context directly in the editor.
@@ -241,6 +241,15 @@ The plugin includes a Model Context Protocol (MCP) server with 30+ tools that ex
 - **UMG Widget Tools** *(new)* - Read & mutate Widget Blueprint trees: query, create, reparent, delete, set properties (with `FSlateBrush.ResourceObject` reflection-safe path)
 - **UMG Animation Tools** *(new)* - Author UWidgetAnimation keyframes from JSON: Float / Color / Vector2D tracks, automatic possessable binding, TickResolution-correct frame conversion
 - **Material Graph + HLSL Tools** *(new)* - Edit `UMaterial` graphs node-by-node (add/connect/set node properties/compile) and rewrite Custom-node HLSL bodies with auto-rebuilt `FCustomInput` arrays
+- **PIE Control Tools** *(new)* - Start/stop/pause/resume Play-In-Editor sessions; inject key/action/axis/move/look input; wait for state transitions
+- **Native Build Tools** *(new)* - Trigger Live Coding for non-layout C++ patches; spawn `Build.bat` + auto-relaunch for USTRUCT/UCLASS layout changes
+- **StateTree Tools** *(new)* - Query states/transitions/tasks/evaluators/parameters; mutate via add_state / add_task / add_transition / remove_state
+- **UMG Session Anchor** *(new)* - Implicit current-widget target shared across umg_query / umg_modify / umg_animation
+- **Asset Management Tools** *(new)* - Full asset CRUD: search / find / list_folder / open / save / duplicate / move / reference-aware delete
+- **Log Reader Tools** *(new)* - Direct `Saved/Logs/*.log` access: tail / head / regex filter / errors / warnings / incremental since-cursor
+- **Web Research Tools** *(new)* - DuckDuckGo search + Jina AI Reader markdown fetch + OpenStreetMap Nominatim geocoding (no API keys)
+- **Niagara Tools** *(new)* - List systems, inspect emitters, spawn at location, set float/vec3/color parameters
+- **GAS Tools** *(new)* - Inspect AttributeSets / Abilities / Effects, create BPs with project-subclass parents, set ability tags + effect modifiers
 - **Enhanced Input Tools** - Input action and mapping context management
 - **Utility Tools** - Console commands, output log, viewport capture, script execution
 - **Async Task Queue** - Background execution for long-running operations
@@ -273,7 +282,7 @@ Root-pin smart aliases preserved (`Output`/`FinalColor` → `EmissiveColor` for 
 
 | Operation | Description |
 |-----------|-------------|
-| `get_all_animations` | List every `UWidgetAnimation` on a widget blueprint |
+| `get_all_animations` | List every `UWidgetAnimation` on a widget blueprint (optional `detailed: true` adds per-widget track + key-count breakdown) |
 | `create_animation` / `delete_animation` | Find-or-create / destructive remove (requires `confirm_delete`) |
 | `get_animation_keyframes` | Dump every track + key for a named animation |
 | `get_widget_animation_data` | Per-widget timeline (filtered Float / Color / Vector2D) |
@@ -281,10 +290,117 @@ Root-pin smart aliases preserved (`Output`/`FinalColor` → `EmissiveColor` for 
 | `remove_property_track` / `remove_keys` | Drop the entire track or specific keys (`confirm_delete`) |
 | `append_widget_tracks` | Batch wrapper: per widget, multiple tracks |
 | `set_animation_data` | L2 batch wrapper: widget + tracks list |
+| `sample_at_time` *(PR-D)* | Evaluate every track at one or more query times (interpolated) |
+| `append_time_slice` *(PR-D)* | Write keys for many widgets+properties at a single time |
 
 Track type is auto-detected from `keys[*].value` shape: `number` → `UMovieSceneFloatTrack`, `{r,g,b,a}` → `UMovieSceneColorTrack`, `{x,y}` → `UMovieSceneDoubleVectorTrack(NumChannels=2)`. Frame conversion uses `MovieScene->GetTickResolution()` (typically 60000 fps), **not** a hardcoded 60 Hz. Possessable bindings + `WidgetVariableNameToGuidMap` are auto-created for unknown widgets, and `PlaybackRange` is auto-extended on every key write so late-timeline keys don't get clipped.
 
 > Attribution: Portions adapted from [UmgMcp (MIT)](https://github.com/winyunq/UnrealMotionGraphicsMCP) © 2025-2026 Winyunq. The original `UmgAttentionSubsystem` global-state model was dropped — every operation requires an explicit `widget_blueprint_path` / `animation_name` / `widget_name` so calls are reproducible across sessions.
+
+#### PIE / Build / UMG Anchor / StateTree (added 2026-05)
+
+Five tools added in the PR-A / PR-B / PR-E rounds covering Play-In-Editor lifecycle, native-code rebuild, UMG implicit-target state, and StateTree authoring.
+
+**`pie_session`** *(PR-A)* — control a Play-In-Editor session:
+
+| Action | Purpose |
+|--------|---------|
+| `start` | Begin PIE in `viewport` / `new_window` / `standalone` mode |
+| `stop` / `pause` / `resume` | Lifecycle control |
+| `get_state` | Inspect current PIE state (running / paused / stopped) |
+| `wait_for` | Block until a specified state is reached |
+
+**`pie_input`** *(PR-A)* — inject input into the active PIE session (`key` / `action` / `axis` / `move_to` / `look_at`), targeting `player_index` 0+.
+
+**`trigger_live_coding`** *(PR-A)* — kick off an Unreal Live Coding recompile (`Ctrl+Alt+F11`) for native C++ patches that don't change reflection layout.
+
+**`build_and_relaunch`** *(PR-A)* — for changes Live Coding cannot patch (USTRUCT layout, UCLASS hierarchy, new UPROPERTY): spawn `Build.bat` against the editor target, then relaunch the editor on the same project.
+
+**`umg_session`** *(PR-B)* — manage the UMG session anchor (the implicit current widget used by `umg_query` / `umg_modify` / `umg_animation` when `widget_blueprint_path` is omitted):
+
+| Operation | Purpose |
+|-----------|---------|
+| `get_target` / `set_target` | Read or write the current target |
+| `get_last_edited` | Last widget the editor opened in-process |
+| `get_recently_edited` | Stack of recently opened widgets |
+
+State lives in `UUMGSessionSubsystem` (editor subsystem), so the anchor survives across MCP calls within the same editor process.
+
+**`statetree_query`** *(PR-E)* — read-only inspection of `UStateTree` assets. Sections selectable via `include`: `states` / `transitions` / `tasks` / `evaluators` / `parameters` / `all`. `detailed: true` adds per-state `selection_behavior` / `depth` / `parent` / `children` / `enabled` / task-and-transition begin indices.
+
+**`statetree_modify`** *(PR-E)* — compound StateTree authoring:
+
+| Operation | Purpose |
+|-----------|---------|
+| `add_state` | Create a new state under root or a parent (`State` / `Group` / `Linked` / `Subtree`) |
+| `add_task` | Attach a `FStateTreeTaskBase` subclass to a state |
+| `add_transition` | Add a transition (target may be a state name or `Succeeded` / `Failed` / `Next`) |
+| `remove_state` | Remove state + children (`confirm_delete: true` required) |
+
+Read-before-write convention: always call `statetree_query` first to confirm asset path + state names. Every mutation wraps `FScopedTransaction` + `Modify()` on StateTree + EditorData + affected state, then `MarkPackageDirty()`.
+
+> Attribution: PR-A + PR-E adapted from [yes-ue-mcp (MIT)](https://github.com/softdaddy-o/yes-ue-mcp) © 2024 softdaddy-o. PR-B `umg_session` adapted from [UmgMcp (MIT)](https://github.com/winyunq/UnrealMotionGraphicsMCP) © 2025-2026 Winyunq.
+
+#### Asset / Logs / Web / Niagara / GAS (added 2026-05)
+
+Five compound tools ported from [VibeUE (MIT)](https://github.com/buckleybuilds/VibeUE) and [ue-mcp (BUSL-1.1)](https://github.com/davidlyon/ue-mcp), adapted to the UnrealClaude tool registry. All follow the existing compound-tool convention (single tool + `operation` parameter dispatch) so the LLM tool list stays compact.
+
+**`asset_manage`** — full asset CRUD with reference-aware operations:
+
+| Operation | Purpose |
+|-----------|---------|
+| `search` | Asset Registry search by name / type / path |
+| `find` | Resolve asset path → existence + class + package |
+| `list_folder` | List assets in a folder, optionally recursive + class filter |
+| `open_in_editor` | Open the asset in its editor window |
+| `save` / `save_all_dirty` | Save a single asset or every dirty package |
+| `duplicate` | Duplicate to a new path (refs preserved) |
+| `move` | Rename / move with referencer redirector updates |
+| `delete` | Reference-aware delete (`confirm_delete: true`, `force?` to break refs) |
+
+**`logs_read`** — direct access to `Saved/Logs/*.log` (complements the in-memory `get_output_log`):
+
+| Operation | Purpose |
+|-----------|---------|
+| `list` / `info` | Enumerate log files / inspect size + line count |
+| `read` / `tail` / `head` | Pagination, last N, first N |
+| `filter` | Regex match across the file (`FRegexMatcher`) |
+| `errors` / `warnings` | Parse `LogXxx: Error: ...` / `Warning: ...` lines with category |
+| `since` | Incremental fetch from a saved cursor |
+
+**`web_research`** — in-editor HTTP via `FHttpModule` (no API keys required):
+
+| Operation | Backend |
+|-----------|---------|
+| `search` | DuckDuckGo HTML scrape (no key) |
+| `fetch_page` | Jina AI Reader (`https://r.jina.ai/<url>`) → markdown |
+| `geocode` / `reverse_geocode` | OpenStreetMap Nominatim (sends required `User-Agent: UnrealClaude/1.x`) |
+
+> Attribution: PR-F three tools adapted from [VibeUE (MIT)](https://github.com/buckleybuilds/VibeUE) © 2025 Kevin Buckley / Buckley Builds LLC.
+
+**`niagara_modify`** — Niagara System inspection + parameter authoring:
+
+| Operation | Purpose |
+|-----------|---------|
+| `list_systems` | Enumerate `UNiagaraSystem` assets under a path |
+| `get_info` | Emitters + exposed parameters of a system |
+| `spawn_at_location` | `UNiagaraFunctionLibrary::SpawnSystemAtLocation` with auto-destroy |
+| `set_parameter` | `SetVariableFloat` / `SetVariableVec3` / `SetVariableLinearColor` (auto-detect from value shape) |
+
+**`gas_modify`** — Gameplay Ability System asset CRUD with project-subclass support:
+
+| Operation | Purpose |
+|-----------|---------|
+| `list_attribute_sets` / `list_abilities` / `list_effects` | Enumerate GAS assets with tags + modifier metadata |
+| `create_ability_blueprint` | Create a new `UGameplayAbility` BP, supports project subclasses (e.g. `UPaogeGameplayAbility`) via `parent_class` |
+| `create_attribute_set_blueprint` | Create a new `UAttributeSet` BP with declared attributes |
+| `create_effect_blueprint` | Create a new `UGameplayEffect` BP with duration policy |
+| `set_ability_tags` | Overwrite `AbilityTags` / `CancelAbilitiesWithTag` / `BlockAbilitiesWithTag` |
+| `set_effect_modifier` | Append a `FGameplayModifierInfo` (Add / Multiply / Override) |
+
+Load-bearing UE 5.7 quirks captured: `UGameplayAbility::AbilityTags` is deprecated → tags are written via `FStructProperty` reflection on the backing `AssetTags` field. `EGameplayModOp::Multiplicitive` (engine typo, **not** Multiplicative) is the correct enum spelling for multiply modifiers. `CancelAbilitiesWithTag` / `BlockAbilitiesWithTag` are `protected` in 5.7 and also written via `FindFProperty<FStructProperty>` + `ContainerPtrToValuePtr`. Every BP write wraps `FScopedTransaction` + `FKismetEditorUtilities::CompileBlueprint` + `MarkPackageDirty` so undo and asset-cache stay coherent.
+
+> Attribution: PR-G two tools adapted from [ue-mcp (BUSL-1.1)](https://github.com/davidlyon/ue-mcp) © 2024 David Lyon. BUSL-1.1 commercial use is project-owner authorized.
 
 #### Dynamic UE 5.7 Context System
 

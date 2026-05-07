@@ -4,6 +4,7 @@
 
 #include "MCPTool_UMGModify.h"
 #include "UMG/UMGCommonUtils.h"
+#include "MCP/Sessions/UMGSessionSubsystem.h"
 
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
@@ -30,6 +31,9 @@ namespace UMGModifyOps
 
 FMCPToolResult FMCPTool_UMGModify::Execute(const TSharedRef<FJsonObject>& Params)
 {
+    // Step 0. UMG session anchor fallback (no-op if path already provided).
+    UUMGSessionSubsystem::ApplyWidgetBlueprintPathFallback(Params);
+
     FString Operation;
     TOptional<FMCPToolResult> Error;
     if (!ExtractRequiredString(Params, TEXT("operation"), Operation, Error))

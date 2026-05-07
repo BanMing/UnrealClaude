@@ -5,6 +5,7 @@
 #include "MCPTool_UMGAnimation.h"
 #include "UMG/UMGCommonUtils.h"
 #include "UMG/AnimationCommonUtils.h"
+#include "MCP/Sessions/UMGSessionSubsystem.h"
 
 #include "WidgetBlueprint.h"
 #include "Animation/WidgetAnimation.h"
@@ -44,6 +45,8 @@ namespace UMGAnimationOps
     static const FString RemoveKeys            = TEXT("remove_keys");
     static const FString AppendWidgetTracks    = TEXT("append_widget_tracks");
     static const FString SetAnimationData      = TEXT("set_animation_data");
+    static const FString SampleAtTime          = TEXT("sample_at_time");
+    static const FString AppendTimeSlice       = TEXT("append_time_slice");
 }
 
 // =============================================================================
@@ -51,6 +54,9 @@ namespace UMGAnimationOps
 // =============================================================================
 FMCPToolResult FMCPTool_UMGAnimation::Execute(const TSharedRef<FJsonObject>& Params)
 {
+    // Step 0. UMG session anchor fallback (no-op if path already provided).
+    UUMGSessionSubsystem::ApplyWidgetBlueprintPathFallback(Params);
+
     FString Operation;
     TOptional<FMCPToolResult> Error;
     if (!ExtractRequiredString(Params, TEXT("operation"), Operation, Error))
@@ -69,11 +75,13 @@ FMCPToolResult FMCPTool_UMGAnimation::Execute(const TSharedRef<FJsonObject>& Par
     if (Operation == UMGAnimationOps::RemoveKeys)             { return ExecuteRemoveKeys(Params); }
     if (Operation == UMGAnimationOps::AppendWidgetTracks)     { return ExecuteAppendWidgetTracks(Params); }
     if (Operation == UMGAnimationOps::SetAnimationData)       { return ExecuteSetAnimationData(Params); }
+    if (Operation == UMGAnimationOps::SampleAtTime)           { return ExecuteSampleAtTime(Params); }
+    if (Operation == UMGAnimationOps::AppendTimeSlice)        { return ExecuteAppendTimeSlice(Params); }
 
     return FMCPToolResult::Error(FString::Printf(
         TEXT("Unknown operation: '%s'. Valid: get_all_animations, create_animation, delete_animation, "
              "get_animation_keyframes, get_widget_animation_data, set_property_keys, remove_property_track, "
-             "remove_keys, append_widget_tracks, set_animation_data"),
+             "remove_keys, append_widget_tracks, set_animation_data, sample_at_time, append_time_slice"),
         *Operation));
 }
 
@@ -169,6 +177,9 @@ FMCPToolResult FMCPTool_UMGAnimation::ExecuteGetAllAnimations(const TSharedRef<F
     UWidgetBlueprint* Blueprint = ResolveBlueprint(Params, Error);
     if (!Blueprint) { return Error; }
 
+    bool bDetailed = false;
+    Params->TryGetBoolField(TEXT("detailed"), bDetailed);
+
     TArray<TSharedPtr<FJsonValue>> Animations;
     for (UWidgetAnimation* Anim : Blueprint->Animations)
     {
@@ -177,14 +188,99 @@ FMCPToolResult FMCPTool_UMGAnimation::ExecuteGetAllAnimations(const TSharedRef<F
         AnimObj->SetStringField(TEXT("name"), Anim->GetName());
         AnimObj->SetNumberField(TEXT("start_time"), Anim->GetStartTime());
         AnimObj->SetNumberField(TEXT("end_time"), Anim->GetEndTime());
+
+        // Detailed mode: enumerate per-widget per-property tracks with key counts.
+        // Adapted from UmgMcp animation_overview (UmgMcpSequencerCommands.cpp::GetAnimationOverview).
+        if (bDetailed)
+        {
+            UMovieScene* MovieScene = Anim->GetMovieScene();
+            TArray<TSharedPtr<FJsonValue>> Tracks;
+            int32 TotalKeyframes = 0;
+
+            if (MovieScene)
+            {
+                for (const FWidgetAnimationBinding& Binding : Anim->AnimationBindings)
+                {
+                    const FString WidgetName = Binding.WidgetName.ToString();
+                    const FGuid ObjectGuid = Binding.AnimationGuid;
+
+                    auto AppendTrack = [&](const FString& Property, const FString& TrackType, int32 KeyCount)
+                    {
+                        TSharedPtr<FJsonObject> TrackObj = MakeShared<FJsonObject>();
+                        TrackObj->SetStringField(TEXT("widget"), WidgetName);
+                        TrackObj->SetStringField(TEXT("property"), Property);
+                        TrackObj->SetStringField(TEXT("track_type"), TrackType);
+                        TrackObj->SetNumberField(TEXT("keys_count"), KeyCount);
+                        Tracks.Add(MakeShared<FJsonValueObject>(TrackObj));
+                        TotalKeyframes += KeyCount;
+                    };
+
+                    for (const UMovieSceneTrack* Track : MovieScene->FindTracks(UMovieSceneFloatTrack::StaticClass(), ObjectGuid))
+                    {
+                        const UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track);
+                        if (!FloatTrack) { continue; }
+                        int32 KeyCount = 0;
+                        for (const UMovieSceneSection* Section : FloatTrack->GetAllSections())
+                        {
+                            if (const UMovieSceneFloatSection* FloatSection = Cast<UMovieSceneFloatSection>(Section))
+                            {
+                                KeyCount += FloatSection->GetChannel().GetData().GetTimes().Num();
+                            }
+                        }
+                        AppendTrack(FloatTrack->GetPropertyName().ToString(), TEXT("float"), KeyCount);
+                    }
+
+                    for (const UMovieSceneTrack* Track : MovieScene->FindTracks(UMovieSceneColorTrack::StaticClass(), ObjectGuid))
+                    {
+                        const UMovieSceneColorTrack* ColorTrack = Cast<UMovieSceneColorTrack>(Track);
+                        if (!ColorTrack) { continue; }
+                        int32 KeyCount = 0;
+                        for (const UMovieSceneSection* Section : ColorTrack->GetAllSections())
+                        {
+                            if (const UMovieSceneColorSection* ColorSection = Cast<UMovieSceneColorSection>(Section))
+                            {
+                                KeyCount += ColorSection->GetRedChannel().GetData().GetTimes().Num();
+                            }
+                        }
+                        AppendTrack(ColorTrack->GetPropertyName().ToString(), TEXT("color"), KeyCount);
+                    }
+
+                    for (const UMovieSceneTrack* Track : MovieScene->FindTracks(UMovieSceneDoubleVectorTrack::StaticClass(), ObjectGuid))
+                    {
+                        const UMovieSceneDoubleVectorTrack* VecTrack = Cast<UMovieSceneDoubleVectorTrack>(Track);
+                        if (!VecTrack || VecTrack->GetNumChannelsUsed() < 2) { continue; }
+                        int32 KeyCount = 0;
+                        for (const UMovieSceneSection* Section : VecTrack->GetAllSections())
+                        {
+                            const UMovieSceneDoubleVectorSection* VecSection = Cast<UMovieSceneDoubleVectorSection>(Section);
+                            if (!VecSection) { continue; }
+                            FMovieSceneChannelProxy& Proxy = const_cast<UMovieSceneDoubleVectorSection*>(VecSection)->GetChannelProxy();
+                            TArrayView<FMovieSceneDoubleChannel*> Channels = Proxy.GetChannels<FMovieSceneDoubleChannel>();
+                            if (Channels.Num() >= 1)
+                            {
+                                KeyCount += Channels[0]->GetData().GetTimes().Num();
+                            }
+                        }
+                        AppendTrack(VecTrack->GetPropertyName().ToString(), TEXT("vector2d"), KeyCount);
+                    }
+                }
+            }
+
+            AnimObj->SetNumberField(TEXT("track_count"), Tracks.Num());
+            AnimObj->SetNumberField(TEXT("keyframe_count"), TotalKeyframes);
+            AnimObj->SetArrayField(TEXT("tracks"), Tracks);
+        }
+
         Animations.Add(MakeShared<FJsonValueObject>(AnimObj));
     }
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("widget_blueprint_path"), Blueprint->GetPathName());
+    Result->SetBoolField(TEXT("detailed"), bDetailed);
     Result->SetNumberField(TEXT("animation_count"), Animations.Num());
     Result->SetArrayField(TEXT("animations"), Animations);
-    return FMCPToolResult::Success(FString::Printf(TEXT("Found %d animations"), Animations.Num()), Result);
+    return FMCPToolResult::Success(FString::Printf(TEXT("Found %d animations%s"),
+        Animations.Num(), bDetailed ? TEXT(" (detailed)") : TEXT("")), Result);
 }
 
 FMCPToolResult FMCPTool_UMGAnimation::ExecuteGetAnimationKeyframes(const TSharedRef<FJsonObject>& Params)
@@ -1052,4 +1148,299 @@ FMCPToolResult FMCPTool_UMGAnimation::ExecuteSetAnimationData(const TSharedRef<F
     // express "here is the entire animation in one go". Implementation just dispatches
     // each track through ExecuteSetPropertyKeys; we share the same input contract.
     return ExecuteAppendWidgetTracks(Params);
+}
+
+// =============================================================================
+//  sample_at_time / append_time_slice (adapted from UmgMcp)
+//  Source: UmgMcpSequencerCommands.cpp::GetTimeSliceProperties / AppendTimeSlice
+// =============================================================================
+
+/**
+ * Evaluate every track in the animation at one or more query times.
+ * Unlike get_animation_keyframes (raw key dump), this samples the *interpolated*
+ * value at arbitrary times — useful for "what is widget X's RenderOpacity at t=0.5s".
+ *
+ * Inputs:
+ *   widget_blueprint_path (required) - widget BP asset path
+ *   animation_name        (required) - animation to sample
+ *   time | times          (required) - single time (seconds) or array of times
+ *   widget_name           (optional) - filter to a single widget binding
+ *   property_filter       (optional) - filter to a single property name
+ *
+ * Output: { animation, slice_count, slices: [{time, values_count, values: [{widget, property, value_type, value}]}] }
+ */
+FMCPToolResult FMCPTool_UMGAnimation::ExecuteSampleAtTime(const TSharedRef<FJsonObject>& Params)
+{
+    FMCPToolResult Error;
+    FAnimationContext Ctx;
+    if (!ResolveAnimationContext(Params, Ctx, Error)) { return Error; }
+
+    // Step 1. Collect query times (accept either `times` array or single `time`).
+    TArray<double> TimesSeconds;
+    const TArray<TSharedPtr<FJsonValue>>* TimesArray = nullptr;
+    if (Params->TryGetArrayField(TEXT("times"), TimesArray) && TimesArray)
+    {
+        for (const TSharedPtr<FJsonValue>& Val : *TimesArray)
+        {
+            if (Val->Type == EJson::Number) { TimesSeconds.Add(Val->AsNumber()); }
+        }
+    }
+    else
+    {
+        double SingleTime = 0.0;
+        if (Params->TryGetNumberField(TEXT("time"), SingleTime))
+        {
+            TimesSeconds.Add(SingleTime);
+        }
+    }
+    if (TimesSeconds.Num() == 0)
+    {
+        return FMCPToolResult::Error(TEXT("Provide 'time' or 'times' (seconds) to sample."));
+    }
+
+    // Step 2. Optional widget / property filters (both nullable).
+    FString WidgetFilter;
+    const bool bHasWidgetFilter = Params->TryGetStringField(TEXT("widget_name"), WidgetFilter) && !WidgetFilter.IsEmpty();
+    FString PropertyFilter;
+    Params->TryGetStringField(TEXT("property_filter"), PropertyFilter);
+
+    const FFrameRate TickResolution = Ctx.MovieScene->GetTickResolution();
+    TArray<TSharedPtr<FJsonValue>> Slices;
+
+    // Step 3. For each query time, evaluate every binding/track and collect interpolated values.
+    for (double QueryTime : TimesSeconds)
+    {
+        const FFrameNumber QueryFrame = AnimationCommonUtils::SecondsToFrame(QueryTime, TickResolution);
+        TArray<TSharedPtr<FJsonValue>> ValuesAtTime;
+
+        for (const FWidgetAnimationBinding& Binding : Ctx.Animation->AnimationBindings)
+        {
+            const FString BindingWidget = Binding.WidgetName.ToString();
+            if (bHasWidgetFilter && BindingWidget != WidgetFilter) { continue; }
+            const FGuid ObjectGuid = Binding.AnimationGuid;
+
+            // Float tracks
+            for (const UMovieSceneTrack* Track : Ctx.MovieScene->FindTracks(UMovieSceneFloatTrack::StaticClass(), ObjectGuid))
+            {
+                const UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track);
+                if (!FloatTrack) { continue; }
+                const FString PropertyName = FloatTrack->GetPropertyName().ToString();
+                if (!PropertyFilter.IsEmpty() && PropertyName != PropertyFilter) { continue; }
+
+                for (const UMovieSceneSection* Section : FloatTrack->GetAllSections())
+                {
+                    const UMovieSceneFloatSection* FloatSection = Cast<UMovieSceneFloatSection>(Section);
+                    if (!FloatSection) { continue; }
+
+                    float EvalValue = 0.f;
+                    if (FloatSection->GetChannel().Evaluate(QueryFrame, EvalValue))
+                    {
+                        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+                        Obj->SetStringField(TEXT("widget"), BindingWidget);
+                        Obj->SetStringField(TEXT("property"), PropertyName);
+                        Obj->SetStringField(TEXT("value_type"), TEXT("float"));
+                        Obj->SetNumberField(TEXT("value"), EvalValue);
+                        ValuesAtTime.Add(MakeShared<FJsonValueObject>(Obj));
+                        break;
+                    }
+                }
+            }
+
+            // Color tracks
+            for (const UMovieSceneTrack* Track : Ctx.MovieScene->FindTracks(UMovieSceneColorTrack::StaticClass(), ObjectGuid))
+            {
+                const UMovieSceneColorTrack* ColorTrack = Cast<UMovieSceneColorTrack>(Track);
+                if (!ColorTrack) { continue; }
+                const FString PropertyName = ColorTrack->GetPropertyName().ToString();
+                if (!PropertyFilter.IsEmpty() && PropertyName != PropertyFilter) { continue; }
+
+                for (const UMovieSceneSection* Section : ColorTrack->GetAllSections())
+                {
+                    const UMovieSceneColorSection* ColorSection = Cast<UMovieSceneColorSection>(Section);
+                    if (!ColorSection) { continue; }
+
+                    float R = 0.f, G = 0.f, B = 0.f, A = 1.f;
+                    bool bHasValue = ColorSection->GetRedChannel().Evaluate(QueryFrame, R);
+                    bHasValue |= ColorSection->GetGreenChannel().Evaluate(QueryFrame, G);
+                    bHasValue |= ColorSection->GetBlueChannel().Evaluate(QueryFrame, B);
+                    bHasValue |= ColorSection->GetAlphaChannel().Evaluate(QueryFrame, A);
+
+                    if (bHasValue)
+                    {
+                        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+                        Obj->SetStringField(TEXT("widget"), BindingWidget);
+                        Obj->SetStringField(TEXT("property"), PropertyName);
+                        Obj->SetStringField(TEXT("value_type"), TEXT("color"));
+
+                        TSharedPtr<FJsonObject> ColorObj = MakeShared<FJsonObject>();
+                        ColorObj->SetNumberField(TEXT("r"), R);
+                        ColorObj->SetNumberField(TEXT("g"), G);
+                        ColorObj->SetNumberField(TEXT("b"), B);
+                        ColorObj->SetNumberField(TEXT("a"), A);
+                        Obj->SetObjectField(TEXT("value"), ColorObj);
+
+                        ValuesAtTime.Add(MakeShared<FJsonValueObject>(Obj));
+                        break;
+                    }
+                }
+            }
+
+            // Vector2D (DoubleVector w/ 2 channels) tracks
+            for (const UMovieSceneTrack* Track : Ctx.MovieScene->FindTracks(UMovieSceneDoubleVectorTrack::StaticClass(), ObjectGuid))
+            {
+                const UMovieSceneDoubleVectorTrack* VecTrack = Cast<UMovieSceneDoubleVectorTrack>(Track);
+                if (!VecTrack || VecTrack->GetNumChannelsUsed() < 2) { continue; }
+                const FString PropertyName = VecTrack->GetPropertyName().ToString();
+                if (!PropertyFilter.IsEmpty() && PropertyName != PropertyFilter) { continue; }
+
+                for (const UMovieSceneSection* Section : VecTrack->GetAllSections())
+                {
+                    const UMovieSceneDoubleVectorSection* VecSection = Cast<UMovieSceneDoubleVectorSection>(Section);
+                    if (!VecSection) { continue; }
+                    FMovieSceneChannelProxy& Proxy = const_cast<UMovieSceneDoubleVectorSection*>(VecSection)->GetChannelProxy();
+                    TArrayView<FMovieSceneDoubleChannel*> Channels = Proxy.GetChannels<FMovieSceneDoubleChannel>();
+                    if (Channels.Num() < 2) { continue; }
+
+                    double X = 0.0, Y = 0.0;
+                    const bool bHasX = Channels[0]->Evaluate(QueryFrame, X);
+                    const bool bHasY = Channels[1]->Evaluate(QueryFrame, Y);
+                    if (bHasX || bHasY)
+                    {
+                        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+                        Obj->SetStringField(TEXT("widget"), BindingWidget);
+                        Obj->SetStringField(TEXT("property"), PropertyName);
+                        Obj->SetStringField(TEXT("value_type"), TEXT("vector2d"));
+
+                        TSharedPtr<FJsonObject> VecObj = MakeShared<FJsonObject>();
+                        VecObj->SetNumberField(TEXT("x"), X);
+                        VecObj->SetNumberField(TEXT("y"), Y);
+                        Obj->SetObjectField(TEXT("value"), VecObj);
+
+                        ValuesAtTime.Add(MakeShared<FJsonValueObject>(Obj));
+                        break;
+                    }
+                }
+            }
+        }
+
+        TSharedPtr<FJsonObject> Slice = MakeShared<FJsonObject>();
+        Slice->SetNumberField(TEXT("time"), QueryTime);
+        Slice->SetNumberField(TEXT("values_count"), ValuesAtTime.Num());
+        Slice->SetArrayField(TEXT("values"), ValuesAtTime);
+        Slices.Add(MakeShared<FJsonValueObject>(Slice));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("animation"), Ctx.Animation->GetName());
+    if (bHasWidgetFilter) { Result->SetStringField(TEXT("widget"), WidgetFilter); }
+    if (!PropertyFilter.IsEmpty()) { Result->SetStringField(TEXT("property_filter"), PropertyFilter); }
+    Result->SetNumberField(TEXT("slice_count"), Slices.Num());
+    Result->SetArrayField(TEXT("slices"), Slices);
+    return FMCPToolResult::Success(
+        FString::Printf(TEXT("Sampled %d slice(s) on animation '%s'"), Slices.Num(), *Ctx.Animation->GetName()),
+        Result);
+}
+
+/**
+ * Append a single keyframe at one timestamp across multiple widgets and properties.
+ * This is the "vertical slice" inverse of append_widget_tracks (which writes many
+ * times across one widget's properties). Useful for snapshot-style animation
+ * authoring: "at t=1.0s, set BG.opacity=0.5 AND Title.translation=(100,0)".
+ *
+ * Inputs:
+ *   widget_blueprint_path (required) - widget BP asset path
+ *   animation_name        (required) - target animation
+ *   time                  (required) - single timestamp in seconds
+ *   widgets               (required) - array of {widget_name, properties:{prop:value,...}}
+ *
+ * Each entry in widgets[] is dispatched to ExecuteSetPropertyKeys with a single
+ * key at the given time. Property value shape (number / {r,g,b,a} / {x,y}) drives
+ * the same auto-detection as set_property_keys.
+ */
+FMCPToolResult FMCPTool_UMGAnimation::ExecuteAppendTimeSlice(const TSharedRef<FJsonObject>& Params)
+{
+    FMCPToolResult Error;
+    FAnimationContext Ctx;
+    if (!ResolveAnimationContext(Params, Ctx, Error)) { return Error; }
+
+    double TimeSeconds = 0.0;
+    if (!Params->TryGetNumberField(TEXT("time"), TimeSeconds))
+    {
+        return FMCPToolResult::Error(TEXT("Missing required parameter: time (seconds)"));
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* WidgetsPtr = nullptr;
+    if (!Params->TryGetArrayField(TEXT("widgets"), WidgetsPtr) || !WidgetsPtr)
+    {
+        return FMCPToolResult::Error(TEXT("Missing required parameter: widgets (array)"));
+    }
+
+    int32 KeysTotal = 0;
+    TArray<TSharedPtr<FJsonValue>> WidgetSummaries;
+
+    // For each widget entry, iterate its `properties` map and dispatch to
+    // ExecuteSetPropertyKeys with a single-key array at TimeSeconds.
+    for (const TSharedPtr<FJsonValue>& WidgetVal : *WidgetsPtr)
+    {
+        TSharedPtr<FJsonObject> WidgetObj = WidgetVal.IsValid() ? WidgetVal->AsObject() : nullptr;
+        if (!WidgetObj.IsValid()) { continue; }
+
+        FString WidgetName;
+        if (!WidgetObj->TryGetStringField(TEXT("widget_name"), WidgetName) || WidgetName.IsEmpty())
+        {
+            return FMCPToolResult::Error(TEXT("Each entry of 'widgets' needs a 'widget_name' string."));
+        }
+
+        const TSharedPtr<FJsonObject>* PropertiesObjPtr = nullptr;
+        if (!WidgetObj->TryGetObjectField(TEXT("properties"), PropertiesObjPtr) || !PropertiesObjPtr || !PropertiesObjPtr->IsValid())
+        {
+            return FMCPToolResult::Error(TEXT("Each widget entry needs a 'properties' object."));
+        }
+        TSharedPtr<FJsonObject> PropertiesObj = *PropertiesObjPtr;
+
+        int32 WidgetKeys = 0;
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : PropertiesObj->Values)
+        {
+            const FString& PropertyName = Pair.Key;
+
+            // Build the single-key array {time, value: <whatever the user passed>}.
+            TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
+            KeyObj->SetNumberField(TEXT("time"), TimeSeconds);
+            KeyObj->SetField(TEXT("value"), Pair.Value);
+
+            TArray<TSharedPtr<FJsonValue>> KeysArray;
+            KeysArray.Add(MakeShared<FJsonValueObject>(KeyObj));
+
+            // Dispatch through the existing set_property_keys handler.
+            TSharedRef<FJsonObject> SubParams = MakeShared<FJsonObject>();
+            SubParams->SetStringField(TEXT("operation"), UMGAnimationOps::SetPropertyKeys);
+            SubParams->SetStringField(TEXT("widget_blueprint_path"), Ctx.Blueprint->GetPathName());
+            SubParams->SetStringField(TEXT("animation_name"), Ctx.Animation->GetName());
+            SubParams->SetStringField(TEXT("widget_name"), WidgetName);
+            SubParams->SetStringField(TEXT("property_name"), PropertyName);
+            SubParams->SetArrayField(TEXT("keys"), KeysArray);
+
+            FMCPToolResult SubResult = ExecuteSetPropertyKeys(SubParams);
+            if (!SubResult.bSuccess) { return SubResult; }
+
+            ++WidgetKeys;
+            ++KeysTotal;
+        }
+
+        TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+        Summary->SetStringField(TEXT("widget"), WidgetName);
+        Summary->SetNumberField(TEXT("keys_applied"), WidgetKeys);
+        WidgetSummaries.Add(MakeShared<FJsonValueObject>(Summary));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("animation"), Ctx.Animation->GetName());
+    Result->SetNumberField(TEXT("time"), TimeSeconds);
+    Result->SetNumberField(TEXT("widgets_updated"), WidgetSummaries.Num());
+    Result->SetNumberField(TEXT("keys_total"), KeysTotal);
+    Result->SetArrayField(TEXT("widgets"), WidgetSummaries);
+    return FMCPToolResult::Success(
+        FString::Printf(TEXT("Appended slice @ %.3fs across %d widget(s) (%d key(s))"),
+            TimeSeconds, WidgetSummaries.Num(), KeysTotal),
+        Result);
 }

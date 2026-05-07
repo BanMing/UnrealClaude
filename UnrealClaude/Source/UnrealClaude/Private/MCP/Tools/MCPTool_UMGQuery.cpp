@@ -4,6 +4,7 @@
 
 #include "MCPTool_UMGQuery.h"
 #include "UMG/UMGCommonUtils.h"
+#include "MCP/Sessions/UMGSessionSubsystem.h"
 
 #include "WidgetBlueprint.h"
 #include "Blueprint/WidgetTree.h"
@@ -27,6 +28,11 @@ namespace UMGQueryOps
 
 FMCPToolResult FMCPTool_UMGQuery::Execute(const TSharedRef<FJsonObject>& Params)
 {
+    // Step 0. Token-saving fallback: if widget_blueprint_path is missing/empty
+    // and the UMG session subsystem has an anchored target, inject it into Params
+    // so downstream validators see the path. No-op if caller already provided one.
+    UUMGSessionSubsystem::ApplyWidgetBlueprintPathFallback(Params);
+
     FString Operation;
     TOptional<FMCPToolResult> Error;
     if (!ExtractRequiredString(Params, TEXT("operation"), Operation, Error))

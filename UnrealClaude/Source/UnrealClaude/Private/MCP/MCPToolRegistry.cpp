@@ -37,6 +37,28 @@
 #include "Tools/MCPTool_MaterialHLSL.h"
 #include "Tools/MCPTool_UMGAnimation.h"
 
+// PR-A: PIE control + Build/LiveCoding (yes-ue-mcp MIT, adapted)
+#include "Tools/MCPTool_PIESession.h"
+#include "Tools/MCPTool_PIEInput.h"
+#include "Tools/MCPTool_TriggerLiveCoding.h"
+#include "Tools/MCPTool_BuildAndRelaunch.h"
+
+// PR-B: UMG session anchor (UmgMcp MIT, adapted)
+#include "Tools/MCPTool_UMGSession.h"
+
+// PR-E: StateTree tool family (yes-ue-mcp MIT, adapted)
+#include "Tools/MCPTool_StateTreeQuery.h"
+#include "Tools/MCPTool_StateTreeModify.h"
+
+// PR-F: VibeUE three-piece (VibeUE MIT, adapted)
+#include "Tools/MCPTool_AssetManage.h"
+#include "Tools/MCPTool_LogsRead.h"
+#include "Tools/MCPTool_WebResearch.h"
+
+// PR-G: ue-mcp two-piece ()
+#include "Tools/MCPTool_NiagaraModify.h"
+#include "Tools/MCPTool_GASModify.h"
+
 // Task queue tools
 #include "Tools/MCPTool_TaskSubmit.h"
 #include "Tools/MCPTool_TaskStatus.h"
@@ -127,6 +149,38 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 
 	// UMG animation tools (Story 3: UMG Animation keyframes — adapted from UmgMcp MIT)
 	RegisterTool(MakeShared<FMCPTool_UMGAnimation>());
+
+	// PR-A: PIE + Build/LiveCoding tools (yes-ue-mcp MIT, adapted)
+	RegisterTool(MakeShared<FMCPTool_PIESession>());
+	RegisterTool(MakeShared<FMCPTool_PIEInput>());
+	RegisterTool(MakeShared<FMCPTool_TriggerLiveCoding>());
+	RegisterTool(MakeShared<FMCPTool_BuildAndRelaunch>());
+
+	// PR-B: UMG session anchor tool (UmgMcp MIT, adapted) — implicit current widget
+	// fallback used by umg_query/umg_modify/umg_animation when widget_blueprint_path
+	// is omitted. State lives in UUMGSessionSubsystem (editor subsystem).
+	RegisterTool(MakeShared<FMCPTool_UMGSession>());
+
+	// PR-E: StateTree tools (yes-ue-mcp MIT, adapted) — read+modify of UStateTree assets.
+	// Read-before-write convention: statetree_query first to confirm asset path + state names,
+	// then statetree_modify (compound: add_state | add_task | add_transition | remove_state).
+	RegisterTool(MakeShared<FMCPTool_StateTreeQuery>());
+	RegisterTool(MakeShared<FMCPTool_StateTreeModify>());
+
+	// PR-F: VibeUE three-piece (VibeUE MIT, adapted)
+	// asset_manage  — compound asset CRUD with reference preservation (search/find/list_folder/
+	//                 open_in_editor/save/save_all_dirty/duplicate/move/delete)
+	// logs_read     — file-based UE log reader (list/info/read/tail/head/filter/errors/warnings/since)
+	// web_research  — UE-process-internal web search (DuckDuckGo / Jina Reader / Nominatim)
+	RegisterTool(MakeShared<FMCPTool_AssetManage>());
+	RegisterTool(MakeShared<FMCPTool_LogsRead>());
+	RegisterTool(MakeShared<FMCPTool_WebResearch>());
+
+	// PR-G: ue-mcp two-piece ()
+	// niagara_modify — compound Niagara ops (list_systems/get_info/spawn_at_location/set_parameter)
+	// gas_modify     — compound GAS ops (list/create/configure abilities, effects, attribute sets)
+	RegisterTool(MakeShared<FMCPTool_NiagaraModify>());
+	RegisterTool(MakeShared<FMCPTool_GASModify>());
 
 	// Create and register async task queue tools
 	// Task queue takes a raw pointer since the registry always outlives it

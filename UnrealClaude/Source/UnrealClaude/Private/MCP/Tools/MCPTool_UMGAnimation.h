@@ -12,6 +12,7 @@
  *
  * Operations:
  *   get_all_animations         - list every UWidgetAnimation on a blueprint
+ *                                (optional `detailed: true` adds per-widget track + key-count breakdown)
  *   create_animation           - find-or-create a UWidgetAnimation by name
  *   delete_animation           - remove a named animation (requires confirm_delete)
  *   get_animation_keyframes    - dump every track + key for the given animation
@@ -21,6 +22,8 @@
  *   remove_keys                - delete keys at specific time(s) on a property track
  *   append_widget_tracks       - batch wrapper for set_property_keys (per widget)
  *   set_animation_data         - L2 batch wrapper (widget + tracks list)
+ *   sample_at_time             - evaluate every track at one or more query times (interpolated)
+ *   append_time_slice          - write keys for many widgets+properties at a single time
  *
  * State model: fully stateless. Every operation requires:
  *   - widget_blueprint_path
@@ -52,7 +55,8 @@ public:
             FMCPToolParameter(TEXT("operation"), TEXT("string"),
                 TEXT("Operation: get_all_animations | create_animation | delete_animation | "
                      "get_animation_keyframes | get_widget_animation_data | set_property_keys | "
-                     "remove_property_track | remove_keys | append_widget_tracks | set_animation_data"),
+                     "remove_property_track | remove_keys | append_widget_tracks | set_animation_data | "
+                     "sample_at_time | append_time_slice"),
                 true),
             FMCPToolParameter(TEXT("widget_blueprint_path"), TEXT("string"),
                 TEXT("UWidgetBlueprint asset path (e.g. /Game/UI/WBP_PaogeBattleHUD)"), true),
@@ -74,7 +78,12 @@ public:
                 TEXT("delete_animation / remove_property_track / remove_keys: must be true to authorize destructive ops"),
                 false, TEXT("false")),
             FMCPToolParameter(TEXT("property_filter"), TEXT("string"),
-                TEXT("get_widget_animation_data: optional property name to narrow output"), false)
+                TEXT("get_widget_animation_data: optional property name to narrow output"), false),
+            FMCPToolParameter(TEXT("detailed"), TEXT("boolean"),
+                TEXT("get_all_animations: when true, include per-widget per-property track summary + keys_count"),
+                false, TEXT("false")),
+            FMCPToolParameter(TEXT("widgets"), TEXT("array"),
+                TEXT("append_time_slice: array of {widget_name, properties:{prop:value,...}}"), false)
         };
         Info.Annotations = FMCPToolAnnotations::Modifying();
         return Info;
@@ -87,6 +96,7 @@ private:
     FMCPToolResult ExecuteGetAllAnimations(const TSharedRef<FJsonObject>& Params);
     FMCPToolResult ExecuteGetAnimationKeyframes(const TSharedRef<FJsonObject>& Params);
     FMCPToolResult ExecuteGetWidgetAnimationData(const TSharedRef<FJsonObject>& Params);
+    FMCPToolResult ExecuteSampleAtTime(const TSharedRef<FJsonObject>& Params);
 
     // --- Write operations ---
     FMCPToolResult ExecuteCreateAnimation(const TSharedRef<FJsonObject>& Params);
@@ -96,4 +106,5 @@ private:
     FMCPToolResult ExecuteRemoveKeys(const TSharedRef<FJsonObject>& Params);
     FMCPToolResult ExecuteAppendWidgetTracks(const TSharedRef<FJsonObject>& Params);
     FMCPToolResult ExecuteSetAnimationData(const TSharedRef<FJsonObject>& Params);
+    FMCPToolResult ExecuteAppendTimeSlice(const TSharedRef<FJsonObject>& Params);
 };
