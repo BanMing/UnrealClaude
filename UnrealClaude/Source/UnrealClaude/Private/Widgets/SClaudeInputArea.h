@@ -11,7 +11,7 @@ class SMultiLineEditableTextBox;
 class SHorizontalBox;
 class SScrollBox;
 
-DECLARE_DELEGATE(FOnInputAction)
+DECLARE_DELEGATE(FOnClaudeInputAction)
 DECLARE_DELEGATE_OneParam(FOnTextChangedEvent, const FString&)
 DECLARE_DELEGATE_OneParam(FOnImagesChanged, const TArray<FString>&)
 
@@ -26,8 +26,8 @@ public:
 		: _bIsWaiting(false)
 	{}
 		SLATE_ATTRIBUTE(bool, bIsWaiting)
-		SLATE_EVENT(FOnInputAction, OnSend)
-		SLATE_EVENT(FOnInputAction, OnCancel)
+		SLATE_EVENT(FOnClaudeInputAction, OnSend)
+		SLATE_EVENT(FOnClaudeInputAction, OnCancel)
 		SLATE_EVENT(FOnTextChangedEvent, OnTextChanged)
 		SLATE_EVENT(FOnImagesChanged, OnImagesChanged)
 	SLATE_END_ARGS()
@@ -100,8 +100,8 @@ private:
 	TArray<TSharedPtr<FSlateDynamicImageBrush>> ThumbnailBrushes;
 
 	TAttribute<bool> bIsWaiting;
-	FOnInputAction OnSend;
-	FOnInputAction OnCancel;
+	FOnClaudeInputAction OnSend;
+	FOnClaudeInputAction OnCancel;
 	FOnTextChangedEvent OnTextChangedDelegate;
 	FOnImagesChanged OnImagesChangedDelegate;
 };

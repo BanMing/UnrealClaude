@@ -31,6 +31,11 @@
 #include "Tools/MCPTool_Material.h"
 #include "Tools/MCPTool_Asset.h"
 #include "Tools/MCPTool_OpenLevel.h"
+#include "Tools/MCPTool_UMGQuery.h"
+#include "Tools/MCPTool_UMGModify.h"
+#include "Tools/MCPTool_MaterialGraph.h"
+#include "Tools/MCPTool_MaterialHLSL.h"
+#include "Tools/MCPTool_UMGAnimation.h"
 
 // Task queue tools
 #include "Tools/MCPTool_TaskSubmit.h"
@@ -111,6 +116,17 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 
 	// Level management tools
 	RegisterTool(MakeShared<FMCPTool_OpenLevel>());
+
+	// UMG widget tools (Story 1: UMG CRUD — adapted from UmgMcp MIT)
+	RegisterTool(MakeShared<FMCPTool_UMGQuery>());
+	RegisterTool(MakeShared<FMCPTool_UMGModify>());
+
+	// Material graph tools (Story 2: Material Graph + HLSL — adapted from UmgMcp MIT)
+	RegisterTool(MakeShared<FMCPTool_MaterialGraph>());
+	RegisterTool(MakeShared<FMCPTool_MaterialHLSL>());
+
+	// UMG animation tools (Story 3: UMG Animation keyframes — adapted from UmgMcp MIT)
+	RegisterTool(MakeShared<FMCPTool_UMGAnimation>());
 
 	// Create and register async task queue tools
 	// Task queue takes a raw pointer since the registry always outlives it

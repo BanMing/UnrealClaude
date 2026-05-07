@@ -59,7 +59,15 @@ public class UnrealClaude : ModuleRules
 				// Asset saving
 				"EditorScriptingUtilities",
 				// Enhanced Input
-				"EnhancedInput"
+				"EnhancedInput",
+				// UMG widget editing (Story 1: UMG CRUD)
+				"UMG",
+				"UMGEditor",
+				// Material graph editing (Story 2: Material Graph + HLSL)
+				"MaterialEditor",
+				// UMG animation / Sequencer (Story 3)
+				"MovieScene",
+				"MovieSceneTracks"
 			}
 		);
 
