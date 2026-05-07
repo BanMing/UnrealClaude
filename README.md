@@ -4,7 +4,7 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat&logo=c%2B%2B&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Win64%20%7C%20Linux%20%7C%20Mac-0078D6?style=flat&logo=windows&logoColor=white)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-Integration-D97757?style=flat&logo=anthropic&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-20%2B%20Tools-8A2BE2?style=flat)
+![MCP](https://img.shields.io/badge/MCP-30%2B%20Tools-8A2BE2?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat)
 
 **Claude Code CLI integration for Unreal Engine 5.7** - Get AI coding assistance with built-in UE5.7 documentation context directly in the editor.
@@ -18,7 +18,7 @@ UnrealClaude integrates the [Claude Code CLI](https://docs.anthropic.com/en/docs
 
 **Key Features:**
 - **Native Editor Integration** - Chat panel docked in your editor with live streaming responses, tool call grouping, and code block rendering
-- **MCP Server** - 20+ Model Context Protocol tools for actor manipulation, Blueprint editing, level management, materials, input, and more
+- **MCP Server** - 30+ Model Context Protocol tools for actor manipulation, Blueprint editing, level management, UMG widgets + animation, material graphs + HLSL, input, and more
 - **Dynamic UE 5.7 Context System** - The MCP bridge includes a dynamic context loader that provides accurate UE 5.7 API documentation on demand
 - **Blueprint Editing** - Create and modify Blueprints, Animation Blueprints, state machines (Few bugs still, don't rely on fully)
 - **Level Management** - Open, create, and manage levels and map templates programmatically
@@ -228,7 +228,7 @@ UnrealClaude automatically gathers information about your project:
 
 ### MCP Server
 
-The plugin includes a Model Context Protocol (MCP) server with 20+ tools that expose editor functionality to Claude and external tools. The MCP server runs on port 8765 by default and starts automatically when the editor loads.
+The plugin includes a Model Context Protocol (MCP) server with 30+ tools that expose editor functionality to Claude and external tools. The MCP server runs on port 8765 by default and starts automatically when the editor loads.
 
 **Tool Categories:**
 - **Actor Tools** - Spawn, move, delete, inspect, and set properties on actors
@@ -237,12 +237,54 @@ The plugin includes a Model Context Protocol (MCP) server with 20+ tools that ex
 - **Animation Blueprint Tools** - Full state machine editing (states, transitions, conditions, batch operations)
 - **Asset Tools** - Search assets, query dependencies and referencers with pagination
 - **Character Tools** - Character configuration, movement settings, and data queries
-- **Material Tools** - Material and material instance operations
+- **Material Tools** - Material and material instance parameter operations
+- **UMG Widget Tools** *(new)* - Read & mutate Widget Blueprint trees: query, create, reparent, delete, set properties (with `FSlateBrush.ResourceObject` reflection-safe path)
+- **UMG Animation Tools** *(new)* - Author UWidgetAnimation keyframes from JSON: Float / Color / Vector2D tracks, automatic possessable binding, TickResolution-correct frame conversion
+- **Material Graph + HLSL Tools** *(new)* - Edit `UMaterial` graphs node-by-node (add/connect/set node properties/compile) and rewrite Custom-node HLSL bodies with auto-rebuilt `FCustomInput` arrays
 - **Enhanced Input Tools** - Input action and mapping context management
 - **Utility Tools** - Console commands, output log, viewport capture, script execution
 - **Async Task Queue** - Background execution for long-running operations
 
 For full MCP tool documentation with parameters, examples, and API details, see [UnrealClaude's MCP Bridge](https://github.com/Natfii/ue5-mcp-bridge) repository.
+
+#### UMG, Animation & Material Authoring (added 2026-05)
+
+Three new tool families ported from [UnrealMotionGraphicsMCP (UmgMcp, MIT)](https://github.com/winyunq/UnrealMotionGraphicsMCP) and adapted to the UnrealClaude tool registry. All are fully stateless — every call takes the explicit asset path; no global "current target" subsystem.
+
+**Story 1 — UMG Widget CRUD** (`umg_query` / `umg_modify`):
+
+| Tool | Operations |
+|------|-----------|
+| `umg_query` | `get_widget_tree`, `query_widget_properties`, `get_widget_schema`, `get_layout_data`, `get_creatable_widget_types` |
+| `umg_modify` | `create_widget`, `set_widget_properties`, `delete_widget`, `reparent_widget`, `save_asset` |
+
+Load-bearing details preserved from the upstream MIT source: `WidgetVariableNameToGuidMap` registration on every variable widget, `FSlateBrush.ResourceObject` reflection interception (FJsonObjectConverter is unstable on this property), separate Slot vs Widget property apply paths, automatic root promotion on empty trees, and `MarkBlueprintAsStructurallyModified` after every write.
+
+**Story 2 — Material Graph + HLSL** (`material_graph` / `material_hlsl`):
+
+| Tool | Operations |
+|------|-----------|
+| `material_graph` | `set_target`, `define_variable`, `add_node`, `delete_node`, `connect_nodes`, `connect_pins`, `set_node_properties`, `get_node_info`, `get_graph`, `set_output_node`, `compile_asset` |
+| `material_hlsl` | `hlsl_set_target`, `hlsl_get`, `hlsl_set`, `hlsl_compile` |
+
+Root-pin smart aliases preserved (`Output`/`FinalColor` → `EmissiveColor` for UI domain, `BaseColor` for surface). Custom HLSL writes auto-rebuild the `FCustomInput` array and call `PostEditChange()` + `ForceRefreshMaterialEditor()`. The two tools are intentionally split because HLSL is a text workflow and graph editing is a node workflow — different LLM mental models.
+
+**Story 3 — UMG Animation Keyframes** (`umg_animation`):
+
+| Operation | Description |
+|-----------|-------------|
+| `get_all_animations` | List every `UWidgetAnimation` on a widget blueprint |
+| `create_animation` / `delete_animation` | Find-or-create / destructive remove (requires `confirm_delete`) |
+| `get_animation_keyframes` | Dump every track + key for a named animation |
+| `get_widget_animation_data` | Per-widget timeline (filtered Float / Color / Vector2D) |
+| `set_property_keys` | Upsert keys on a property track (auto-detects type from key shape) |
+| `remove_property_track` / `remove_keys` | Drop the entire track or specific keys (`confirm_delete`) |
+| `append_widget_tracks` | Batch wrapper: per widget, multiple tracks |
+| `set_animation_data` | L2 batch wrapper: widget + tracks list |
+
+Track type is auto-detected from `keys[*].value` shape: `number` → `UMovieSceneFloatTrack`, `{r,g,b,a}` → `UMovieSceneColorTrack`, `{x,y}` → `UMovieSceneDoubleVectorTrack(NumChannels=2)`. Frame conversion uses `MovieScene->GetTickResolution()` (typically 60000 fps), **not** a hardcoded 60 Hz. Possessable bindings + `WidgetVariableNameToGuidMap` are auto-created for unknown widgets, and `PlaybackRange` is auto-extended on every key write so late-timeline keys don't get clipped.
+
+> Attribution: Portions adapted from [UmgMcp (MIT)](https://github.com/winyunq/UnrealMotionGraphicsMCP) © 2025-2026 Winyunq. The original `UmgAttentionSubsystem` global-state model was dropped — every operation requires an explicit `widget_blueprint_path` / `animation_name` / `widget_name` so calls are reproducible across sessions.
 
 #### Dynamic UE 5.7 Context System
 
