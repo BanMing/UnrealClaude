@@ -101,6 +101,45 @@ void UUMGSessionSubsystem::PushHistory(const FString& AssetPath)
 	}
 }
 
+// ===== Graph cursor =====
+
+// Anchor the active graph and reset the cursor. Switching graphs invalidates both
+// the program-counter node id (it lived in the old graph) and the visual position
+// (a fresh canvas should start at origin).
+//
+// Cursor design portions adapted from UmgMcp (MIT) (c) 2025-2026 Winyunq.
+void UUMGSessionSubsystem::SetTargetGraph(const FString& InGraphName, bool bInIsFunctionGraph)
+{
+	const bool bGraphChanged =
+		(InGraphName != CurrentGraphName) ||
+		(bInIsFunctionGraph != bCurrentGraphIsFunction);
+
+	CurrentGraphName = InGraphName;
+	bCurrentGraphIsFunction = bInIsFunctionGraph;
+
+	// Step 1: clear program-counter node id when graph changes — the old id refers
+	// to a node in a different graph and would silently produce cross-graph wiring
+	// errors if reused.
+	if (bGraphChanged)
+	{
+		CurrentCursorNodeId.Reset();
+		CurrentCursorPosition = FVector2D::ZeroVector;
+	}
+
+	UE_LOG(LogUnrealClaude, Verbose, TEXT("UMG session graph anchored: '%s' (function=%d, changed=%d)"),
+		*InGraphName, bInIsFunctionGraph ? 1 : 0, bGraphChanged ? 1 : 0);
+}
+
+// Returns the cursor position the caller should use, then advances X by
+// CursorAdvanceX so a sequence of position-less add_node calls lays out
+// horizontally instead of stacking at origin.
+FVector2D UUMGSessionSubsystem::GetAndAdvanceCursorPosition()
+{
+	const FVector2D Consumed = CurrentCursorPosition;
+	CurrentCursorPosition.X += CursorAdvanceX;
+	return Consumed;
+}
+
 bool UUMGSessionSubsystem::ApplyWidgetBlueprintPathFallback(const TSharedRef<FJsonObject>& Params)
 {
 	// Step 1: If caller already provided a non-empty path, do nothing.

@@ -1,6 +1,7 @@
 // Copyright Natali Caggiano. All Rights Reserved.
 
 #include "BlueprintGraphEditor.h"
+#include "MCPScopedTransaction.h"
 #include "UnrealClaudeModule.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "K2Node_FunctionEntry.h"
@@ -20,6 +21,10 @@
 #include "UObject/UObjectIterator.h"
 #include "HAL/PlatformAtomics.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_DynamicCast.h"
+#include "K2Node_Knot.h"
+#include "K2Node_SwitchEnum.h"
+#include "K2Node_MakeArray.h"
 #include "EdGraphUtilities.h"
 #include "EditorAssetLibrary.h"
 
@@ -104,6 +109,14 @@ UEdGraphNode* FBlueprintGraphEditor::CreateNode(
 		return nullptr;
 	}
 
+	// Open an undo transaction so the entire node-creation is reversible via Ctrl+Z.
+	// The transaction commits automatically when Tx goes out of scope (RAII).
+	TSharedPtr<FScopedTransaction> Tx = FMCPScopedTransaction::Begin(
+		NSLOCTEXT("UnrealClaudeMCP", "CreateNode", "MCP: Create blueprint node"));
+
+	// Mark the graph as modified so the transaction system records its pre-state.
+	Graph->Modify();
+
 	UEdGraphNode* NewNode = nullptr;
 	FString Context;
 
@@ -157,14 +170,41 @@ UEdGraphNode* FBlueprintGraphEditor::CreateNode(
 		Context = TEXT("PrintString");
 		NewNode = CreateCallFunctionNode(Graph, TEXT("PrintString"), TEXT("KismetSystemLibrary"), PosX, PosY, OutError);
 	}
+	else if (NodeType.Equals(TEXT("DynamicCast"), ESearchCase::IgnoreCase) || NodeType.Equals(TEXT("Cast"), ESearchCase::IgnoreCase))
+	{
+		FString ClassName = NodeParams.IsValid() ? NodeParams->GetStringField(TEXT("target_class")) : TEXT("");
+		Context = ClassName;
+		NewNode = CreateDynamicCastNode(Graph, ClassName, PosX, PosY, OutError);
+	}
+	else if (NodeType.Equals(TEXT("Knot"), ESearchCase::IgnoreCase) || NodeType.Equals(TEXT("Reroute"), ESearchCase::IgnoreCase))
+	{
+		NewNode = CreateKnotNode(Graph, PosX, PosY, OutError);
+	}
+	else if (NodeType.Equals(TEXT("SwitchEnum"), ESearchCase::IgnoreCase) || NodeType.Equals(TEXT("Switch"), ESearchCase::IgnoreCase))
+	{
+		FString EnumName = NodeParams.IsValid() ? NodeParams->GetStringField(TEXT("enum")) : TEXT("");
+		Context = EnumName;
+		NewNode = CreateSwitchEnumNode(Graph, EnumName, PosX, PosY, OutError);
+	}
+	else if (NodeType.Equals(TEXT("MakeArray"), ESearchCase::IgnoreCase))
+	{
+		FString ElementType = (NodeParams.IsValid() && NodeParams->HasField(TEXT("element_type")))
+			? NodeParams->GetStringField(TEXT("element_type"))
+			: TEXT("");
+		NewNode = CreateMakeArrayNode(Graph, ElementType, PosX, PosY, OutError);
+	}
 	else
 	{
-		OutError = FString::Printf(TEXT("Unknown node type: '%s'. Supported: CallFunction, Branch, Event, VariableGet, VariableSet, Sequence, Add, Subtract, Multiply, Divide, PrintString"), *NodeType);
+		OutError = FString::Printf(TEXT("Unknown node type: '%s'. Supported: CallFunction, Branch, Event, VariableGet, VariableSet, Sequence, Add, Subtract, Multiply, Divide, PrintString, DynamicCast, Knot, SwitchEnum, MakeArray"), *NodeType);
 		return nullptr;
 	}
 
 	if (NewNode)
 	{
+		// Record the node's pre-creation state in the transaction so individual
+		// node changes are captured in addition to the graph-level Modify above.
+		NewNode->Modify();
+
 		// Generate and set node ID
 		OutNodeId = GenerateNodeId(NodeType, Context, Graph);
 		SetNodeId(NewNode, OutNodeId);
@@ -192,6 +232,14 @@ bool FBlueprintGraphEditor::DeleteNode(UEdGraph* Graph, const FString& NodeId, F
 		OutError = FString::Printf(TEXT("Node '%s' not found"), *NodeId);
 		return false;
 	}
+
+	// Open undo transaction before any destructive change.
+	TSharedPtr<FScopedTransaction> Tx = FMCPScopedTransaction::Begin(
+		NSLOCTEXT("UnrealClaudeMCP", "DeleteNode", "MCP: Delete blueprint node"));
+
+	// Record pre-deletion state of both the graph and the node.
+	Graph->Modify();
+	Node->Modify();
 
 	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
 
@@ -270,6 +318,16 @@ bool FBlueprintGraphEditor::ConnectPins(
 		OutError = FString::Printf(TEXT("Target node '%s' not found"), *TargetNodeId);
 		return false;
 	}
+
+	// Open undo transaction after node validation so aborted calls don't pollute
+	// the undo stack, but before any graph state is mutated.
+	TSharedPtr<FScopedTransaction> Tx = FMCPScopedTransaction::Begin(
+		NSLOCTEXT("UnrealClaudeMCP", "ConnectPins", "MCP: Connect blueprint pins"));
+
+	// Record pre-connection state of both involved nodes and the graph.
+	Graph->Modify();
+	SourceNode->Modify();
+	TargetNode->Modify();
 
 	// Find pins - auto-detect exec pins if names are empty
 	UEdGraphPin* SourcePin = nullptr;
@@ -400,6 +458,16 @@ bool FBlueprintGraphEditor::DisconnectPins(
 		return false;
 	}
 
+	// Open undo transaction after lookups succeed but before any mutation, so a
+	// failed validation does not leave an empty entry on the undo stack.
+	TSharedPtr<FScopedTransaction> Tx = FMCPScopedTransaction::Begin(
+		NSLOCTEXT("UnrealClaudeMCP", "DisconnectPins", "MCP: Disconnect blueprint pins"));
+
+	// Record pre-disconnect state of the graph and both involved nodes.
+	Graph->Modify();
+	SourceNode->Modify();
+	TargetNode->Modify();
+
 	// Break the link
 	SourcePin->BreakLinkTo(TargetPin);
 
@@ -442,6 +510,14 @@ bool FBlueprintGraphEditor::SetPinDefaultValue(
 		OutError = FString::Printf(TEXT("Input pin '%s' not found on node '%s'"), *PinName, *NodeId);
 		return false;
 	}
+
+	// Open undo transaction after pin lookup succeeds. The pin's owning node
+	// is what the transaction system records, since pins are not UObjects.
+	TSharedPtr<FScopedTransaction> Tx = FMCPScopedTransaction::Begin(
+		NSLOCTEXT("UnrealClaudeMCP", "SetPinDefaultValue", "MCP: Set pin default value"));
+
+	// Record pre-change state of the node owning the pin.
+	Node->Modify();
 
 	// Set the default value
 	const UEdGraphSchema* Schema = Graph->GetSchema();
@@ -1424,4 +1500,162 @@ UEdGraphNode* FBlueprintGraphEditor::CreateMathNode(
 	NodeCreator.Finalize();
 
 	return MathNode;
+}
+
+// ===== Advanced K2Node Helpers (P2: ported from unreal-engine-mcp) =====
+
+UEdGraphNode* FBlueprintGraphEditor::CreateDynamicCastNode(
+	UEdGraph* Graph,
+	const FString& ClassName,
+	int32 PosX,
+	int32 PosY,
+	FString& OutError)
+{
+	// 1. Validate input — DynamicCast is meaningless without a target class.
+	if (ClassName.IsEmpty())
+	{
+		OutError = TEXT("target_class is required for DynamicCast node");
+		return nullptr;
+	}
+
+	// 2. Resolve UClass by name. Mirrors CreateCallFunctionNode's lookup chain:
+	//    direct path → /Script/Engine. → /Script/CoreUObject. → FindFirstObject (native first, then any).
+	UClass* TargetClass = FindObject<UClass>(nullptr, *ClassName);
+	if (!TargetClass)
+	{
+		TargetClass = LoadClass<UObject>(nullptr,
+			*FString::Printf(TEXT("/Script/Engine.%s"), *ClassName));
+	}
+	if (!TargetClass)
+	{
+		TargetClass = LoadClass<UObject>(nullptr,
+			*FString::Printf(TEXT("/Script/CoreUObject.%s"), *ClassName));
+	}
+	if (!TargetClass)
+	{
+		TargetClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!TargetClass)
+	{
+		TargetClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None);
+	}
+
+	if (!TargetClass)
+	{
+		OutError = FString::Printf(TEXT("Target class '%s' not found"), *ClassName);
+		return nullptr;
+	}
+
+	// 3. Create the cast node. CRITICAL: TargetType must be set BEFORE Finalize()
+	//    so AllocateDefaultPins() generates the correct "As<ClassName>" output pin
+	//    and the typed object input pin. Setting it after Finalize leaves the node
+	//    with wildcard pins until ReconstructNode() is manually invoked.
+	FGraphNodeCreator<UK2Node_DynamicCast> NodeCreator(*Graph);
+	UK2Node_DynamicCast* CastNode = NodeCreator.CreateNode();
+	CastNode->TargetType = TargetClass;
+	CastNode->NodePosX = PosX;
+	CastNode->NodePosY = PosY;
+	NodeCreator.Finalize();
+
+	return CastNode;
+}
+
+UEdGraphNode* FBlueprintGraphEditor::CreateKnotNode(
+	UEdGraph* Graph,
+	int32 PosX,
+	int32 PosY,
+	FString& OutError)
+{
+	// Knot (a.k.a. reroute) nodes are pure wire passthroughs — no class lookup,
+	// no params, no special pin allocation. They infer pin type from the first
+	// connection made to them at edit time.
+	FGraphNodeCreator<UK2Node_Knot> NodeCreator(*Graph);
+	UK2Node_Knot* KnotNode = NodeCreator.CreateNode();
+	KnotNode->NodePosX = PosX;
+	KnotNode->NodePosY = PosY;
+	NodeCreator.Finalize();
+
+	return KnotNode;
+}
+
+UEdGraphNode* FBlueprintGraphEditor::CreateSwitchEnumNode(
+	UEdGraph* Graph,
+	const FString& EnumName,
+	int32 PosX,
+	int32 PosY,
+	FString& OutError)
+{
+	// 1. Validate input — SwitchEnum requires an enum to drive its cases.
+	if (EnumName.IsEmpty())
+	{
+		OutError = TEXT("enum is required for SwitchEnum node");
+		return nullptr;
+	}
+
+	// 2. Resolve UEnum by name. Same fallback chain as the class lookup above,
+	//    but typed for UEnum.
+	UEnum* TargetEnum = FindObject<UEnum>(nullptr, *EnumName);
+	if (!TargetEnum)
+	{
+		TargetEnum = LoadObject<UEnum>(nullptr,
+			*FString::Printf(TEXT("/Script/Engine.%s"), *EnumName));
+	}
+	if (!TargetEnum)
+	{
+		TargetEnum = LoadObject<UEnum>(nullptr,
+			*FString::Printf(TEXT("/Script/CoreUObject.%s"), *EnumName));
+	}
+	if (!TargetEnum)
+	{
+		TargetEnum = FindFirstObject<UEnum>(*EnumName, EFindFirstObjectOptions::NativeFirst);
+	}
+	if (!TargetEnum)
+	{
+		TargetEnum = FindFirstObject<UEnum>(*EnumName, EFindFirstObjectOptions::None);
+	}
+
+	if (!TargetEnum)
+	{
+		OutError = FString::Printf(TEXT("Enum '%s' not found"), *EnumName);
+		return nullptr;
+	}
+
+	// 3. Create the switch node, set the enum, then ReconstructNode so the per-value
+	//    output exec pins regenerate to match the enum's entries. Without the
+	//    explicit ReconstructNode call the node would keep its empty default pin set.
+	FGraphNodeCreator<UK2Node_SwitchEnum> NodeCreator(*Graph);
+	UK2Node_SwitchEnum* SwitchNode = NodeCreator.CreateNode();
+	SwitchNode->Enum = TargetEnum;
+	SwitchNode->NodePosX = PosX;
+	SwitchNode->NodePosY = PosY;
+	NodeCreator.Finalize();
+
+	// Regenerate output pins from enum entries (one exec pin per enum value).
+	SwitchNode->ReconstructNode();
+
+	return SwitchNode;
+}
+
+UEdGraphNode* FBlueprintGraphEditor::CreateMakeArrayNode(
+	UEdGraph* Graph,
+	const FString& ElementType,
+	int32 PosX,
+	int32 PosY,
+	FString& OutError)
+{
+	// MakeArray is wildcard by default — it picks up the element type from the
+	// first connected input pin at edit time. We intentionally do NOT pre-set
+	// the pin type here even when ElementType is provided, because doing so
+	// reliably across all primitive/struct/object cases requires resolving the
+	// type into FEdGraphPinType (covered by FBlueprintUtils::ParsePinType in
+	// the variable-creation path, but not exposed here without coupling).
+	// Leaving wildcard means the user (or a follow-up connect_pins call) drives
+	// the typing — same behavior as dragging a MakeArray node from the palette.
+	FGraphNodeCreator<UK2Node_MakeArray> NodeCreator(*Graph);
+	UK2Node_MakeArray* MakeArrayNode = NodeCreator.CreateNode();
+	MakeArrayNode->NodePosX = PosX;
+	MakeArrayNode->NodePosY = PosY;
+	NodeCreator.Finalize();
+
+	return MakeArrayNode;
 }

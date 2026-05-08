@@ -4,6 +4,7 @@
 #include "BlueprintUtils.h"
 #include "MCP/MCPParamValidator.h"
 #include "MCP/MCPBlueprintLoadContext.h"
+#include "MCP/Sessions/UMGSessionSubsystem.h"
 #include "UnrealClaudeModule.h"
 #include "Engine/Blueprint.h"
 
@@ -14,6 +15,7 @@ namespace BlueprintModifyOps
 	static const FString AddVariable = TEXT("add_variable");
 	static const FString RemoveVariable = TEXT("remove_variable");
 	static const FString AddFunction = TEXT("add_function");
+	static const FString AddCustomEvent = TEXT("add_custom_event");
 	static const FString RemoveFunction = TEXT("remove_function");
 	static const FString AddNode = TEXT("add_node");
 	static const FString AddNodes = TEXT("add_nodes");
@@ -55,6 +57,10 @@ FMCPToolResult FMCPTool_BlueprintModify::Execute(const TSharedRef<FJsonObject>& 
 	if (Operation == BlueprintModifyOps::AddFunction)
 	{
 		return ExecuteAddFunction(Params);
+	}
+	if (Operation == BlueprintModifyOps::AddCustomEvent)
+	{
+		return ExecuteAddCustomEvent(Params);
 	}
 	if (Operation == BlueprintModifyOps::RemoveFunction)
 	{
@@ -106,7 +112,7 @@ FMCPToolResult FMCPTool_BlueprintModify::Execute(const TSharedRef<FJsonObject>& 
 	}
 
 	return FMCPToolResult::Error(FString::Printf(
-		TEXT("Unknown operation: '%s'. Valid: create, add_variable, remove_variable, add_function, remove_function, add_node, add_nodes, delete_node, connect_pins, disconnect_pins, set_pin_value, export_function, import_nodes, replace_function_body, batch_modify"),
+		TEXT("Unknown operation: '%s'. Valid: create, add_variable, remove_variable, add_function, add_custom_event, remove_function, add_node, add_nodes, delete_node, connect_pins, disconnect_pins, set_pin_value, export_function, import_nodes, replace_function_body, batch_modify"),
 		*Operation));
 }
 
@@ -336,6 +342,69 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddFunction(const TSharedRef<FJs
 	);
 }
 
+// Add a UK2Node_CustomEvent to the Blueprint's Event Graph.
+//
+// This is a logic-light alternative to ExecuteAddFunction: instead of allocating a
+// full FunctionGraph (which on certain UE versions can crash for WidgetBlueprints
+// inside FBlueprintEditorUtils::AddFunctionGraph), it inserts a custom event node
+// directly into UbergraphPages[0]. Suitable for UI button handlers and other
+// fire-and-forget entry points that do not need parameter pins, return nodes, or
+// recursion. Mirrors the parameter shape of ExecuteAddFunction (re-uses
+// `function_name` so callers do not have to learn a second key).
+//
+// Portions adapted from UmgMcp (MIT) (c) 2025-2026 Winyunq.
+// https://github.com/winyunq/UnrealMotionGraphicsMCP
+FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddCustomEvent(const TSharedRef<FJsonObject>& Params)
+{
+	// Step 1: Extract event name (we re-use `function_name` so the param surface
+	// is identical to ExecuteAddFunction; callers can swap ops without re-keying).
+	TOptional<FMCPToolResult> Error;
+	FString EventName;
+	if (!ExtractRequiredString(Params, TEXT("function_name"), EventName, Error))
+	{
+		return Error.GetValue();
+	}
+
+	// Step 2: Validate identifier (same rules as a function name — alpha/_, alnum/_).
+	FString ValidationError;
+	if (!FMCPParamValidator::ValidateBlueprintFunctionName(EventName, ValidationError))
+	{
+		return FMCPToolResult::Error(ValidationError);
+	}
+
+	// Step 3: Load + lock the Blueprint via the standard RAII context.
+	FMCPBlueprintLoadContext Context;
+	if (auto LoadError = Context.LoadAndValidate(Params))
+	{
+		return LoadError.GetValue();
+	}
+
+	// Step 4: Insert the CustomEvent node (helper rejects duplicates / null graph).
+	FString AddError;
+	if (!FBlueprintUtils::AddCustomEvent(Context.Blueprint, EventName, AddError))
+	{
+		return FMCPToolResult::Error(AddError);
+	}
+
+	// Step 5: Compile + mark dirty in one pass.
+	if (auto CompileError = Context.CompileAndFinalize(TEXT("CustomEvent added")))
+	{
+		return CompileError.GetValue();
+	}
+
+	// Step 6: Build response payload — `event_name` is the canonical key for this
+	// op; `function_name` is mirrored so legacy clients reading add_function results
+	// continue to work without branching on op type.
+	TSharedPtr<FJsonObject> ResultData = Context.BuildResultJson();
+	ResultData->SetStringField(TEXT("event_name"), EventName);
+	ResultData->SetStringField(TEXT("function_name"), EventName);
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Added CustomEvent '%s' to Blueprint Event Graph"), *EventName),
+		ResultData
+	);
+}
+
 FMCPToolResult FMCPTool_BlueprintModify::ExecuteRemoveFunction(const TSharedRef<FJsonObject>& Params)
 {
 	// Extract parameters
@@ -415,6 +484,16 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddNode(const TSharedRef<FJsonOb
 
 	FString GraphName = ExtractOptionalString(Params, TEXT("graph_name"), TEXT(""));
 	bool bFunctionGraph = ExtractOptionalBool(Params, TEXT("is_function_graph"), false);
+
+	// Step: detect whether the caller explicitly supplied pos_x / pos_y. Both
+	// are typed Number fields in the schema; HasTypedField separates "user passed
+	// 0 deliberately" from "user omitted the key" — without this distinction we
+	// would never reach the cursor branch since ExtractOptionalNumber defaults
+	// the missing case to 0.
+	const bool bHasExplicitX = Params->HasTypedField<EJson::Number>(TEXT("pos_x"));
+	const bool bHasExplicitY = Params->HasTypedField<EJson::Number>(TEXT("pos_y"));
+	const bool bUseCursor = !bHasExplicitX && !bHasExplicitY;
+
 	int32 PosX = (int32)ExtractOptionalNumber(Params, TEXT("pos_x"), 0);
 	int32 PosY = (int32)ExtractOptionalNumber(Params, TEXT("pos_y"), 0);
 
@@ -441,6 +520,28 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddNode(const TSharedRef<FJsonOb
 		return FMCPToolResult::Error(GraphError);
 	}
 
+	// Cursor-driven auto-layout. When the caller omits BOTH pos_x and pos_y, the
+	// node lands at the session cursor's current slot and the cursor advances
+	// horizontally so a sequence of position-less add_node calls produces a
+	// left-to-right ribbon. A graph switch implicitly clears the cursor inside
+	// SetTargetGraph, so the first node in a new graph starts at origin.
+	//
+	// Cursor design portions adapted from UmgMcp (MIT) (c) 2025-2026 Winyunq.
+	UUMGSessionSubsystem* Session = UUMGSessionSubsystem::Get();
+	if (Session)
+	{
+		// Step: anchor the active graph (clears cursor if graph changed).
+		Session->SetTargetGraph(GraphName, bFunctionGraph);
+
+		// Step: only consume cursor when caller did not supply explicit coords.
+		if (bUseCursor)
+		{
+			const FVector2D CursorPos = Session->GetAndAdvanceCursorPosition();
+			PosX = (int32)CursorPos.X;
+			PosY = (int32)CursorPos.Y;
+		}
+	}
+
 	// Create the node
 	FString NodeId;
 	FString CreateError;
@@ -448,6 +549,14 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddNode(const TSharedRef<FJsonOb
 	if (!NewNode)
 	{
 		return FMCPToolResult::Error(CreateError);
+	}
+
+	// Step: program-counter update — record this node id as the cursor anchor so
+	// follow-up tools (e.g. a future "connect to last" helper) can chain off it
+	// without the caller threading the id back through every params payload.
+	if (Session)
+	{
+		Session->SetCursorNode(NodeId);
 	}
 
 	// Apply pin default values if provided
@@ -478,6 +587,11 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddNode(const TSharedRef<FJsonOb
 	TSharedPtr<FJsonObject> ResultData = FBlueprintUtils::SerializeNodeInfo(NewNode);
 	ResultData->SetStringField(TEXT("blueprint_path"), Context.Blueprint->GetPathName());
 	ResultData->SetStringField(TEXT("graph_name"), Graph->GetName());
+	// Echo the resolved position so callers can see whether the cursor was used
+	// (helps debug "all nodes stacked" / "nodes not at expected coords" reports).
+	ResultData->SetNumberField(TEXT("pos_x"), PosX);
+	ResultData->SetNumberField(TEXT("pos_y"), PosY);
+	ResultData->SetBoolField(TEXT("used_cursor"), bUseCursor);
 
 	return FMCPToolResult::Success(
 		FString::Printf(TEXT("Created node '%s' (type: %s)"), *NodeId, *NodeType),

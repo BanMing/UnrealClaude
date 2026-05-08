@@ -13,6 +13,7 @@
  *   - add_variable: Add a variable to a Blueprint
  *   - remove_variable: Remove a variable from a Blueprint
  *   - add_function: Add an empty function to a Blueprint
+ *   - add_custom_event: Add a UK2Node_CustomEvent to the Event Graph (logic-light alt to add_function)
  *   - remove_function: Remove a function from a Blueprint
  *
  * Level 3 Operations (Nodes):
@@ -45,7 +46,7 @@ public:
 		Info.Description = TEXT(
 			"Create and modify Blueprints programmatically. Auto-compiles after changes.\n\n"
 			"Complexity Levels:\n"
-			"Level 2 (Structure): 'create', 'add_variable', 'remove_variable', 'add_function', 'remove_function'\n"
+			"Level 2 (Structure): 'create', 'add_variable', 'remove_variable', 'add_function', 'add_custom_event', 'remove_function'\n"
 			"Level 3 (Nodes): 'add_node', 'add_nodes' (batch), 'delete_node'\n"
 			"Level 4 (Wiring): 'connect_pins', 'disconnect_pins', 'set_pin_value'\n"
 			"Level 5 (Graph I/O): 'export_function', 'import_nodes', 'replace_function_body'\n"
@@ -83,7 +84,7 @@ public:
 
 			// For function operations
 			FMCPToolParameter(TEXT("function_name"), TEXT("string"),
-				TEXT("Function name"), false),
+				TEXT("Function name (also used as event name for 'add_custom_event')"), false),
 
 			// For node operations (Level 3)
 			FMCPToolParameter(TEXT("graph_name"), TEXT("string"),
@@ -145,6 +146,7 @@ private:
 	FMCPToolResult ExecuteAddVariable(const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult ExecuteRemoveVariable(const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult ExecuteAddFunction(const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult ExecuteAddCustomEvent(const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult ExecuteRemoveFunction(const TSharedRef<FJsonObject>& Params);
 
 	// Level 3 Operations (Nodes)

@@ -4,7 +4,9 @@
 #include "UnrealClaudeModule.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "K2Node_FunctionEntry.h"
+#include "K2Node_CustomEvent.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
 
 // ===== Variable Management =====
 
@@ -192,6 +194,70 @@ bool FBlueprintEditor::RemoveFunction(
 	return true;
 }
 
+bool FBlueprintEditor::AddCustomEvent(
+	UBlueprint* Blueprint,
+	const FString& EventName,
+	FString& OutError)
+{
+	// Step 1. Validate inputs.
+	if (!Blueprint)
+	{
+		OutError = TEXT("Blueprint is null");
+		return false;
+	}
+
+	if (!ValidateFunctionName(EventName, OutError))
+	{
+		return false;
+	}
+
+	// Step 2. Locate the canonical Event Graph (UbergraphPages[0]).
+	if (Blueprint->UbergraphPages.Num() == 0)
+	{
+		OutError = TEXT("Blueprint has no Event Graph (UbergraphPages is empty)");
+		return false;
+	}
+	UEdGraph* EventGraph = Blueprint->UbergraphPages[0];
+	if (!EventGraph)
+	{
+		OutError = TEXT("Blueprint Event Graph is null");
+		return false;
+	}
+
+	// Step 3. Reject duplicates: a CustomEvent with the same name already in this graph
+	// would silently shadow the request and confuse later wiring calls.
+	const FName EventFName(*EventName);
+	for (UEdGraphNode* ExistingNode : EventGraph->Nodes)
+	{
+		if (UK2Node_CustomEvent* ExistingEvent = Cast<UK2Node_CustomEvent>(ExistingNode))
+		{
+			if (ExistingEvent->CustomFunctionName == EventFName)
+			{
+				OutError = FString::Printf(TEXT("CustomEvent '%s' already exists in Event Graph"), *EventName);
+				return false;
+			}
+		}
+	}
+
+	// Step 4. Construct the new CustomEvent node via the standard K2 graph factory.
+	FGraphNodeCreator<UK2Node_CustomEvent> NodeCreator(*EventGraph);
+	UK2Node_CustomEvent* NewEvent = NodeCreator.CreateNode(/*bSelectNewNode*/ false);
+	if (!NewEvent)
+	{
+		OutError = TEXT("Failed to allocate UK2Node_CustomEvent");
+		return false;
+	}
+	NewEvent->CustomFunctionName = EventFName;
+	NodeCreator.Finalize();
+
+	// Step 5. Mark structurally modified so dependent callers (variable maps, compiler) refresh.
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	UE_LOG(LogUnrealClaude, Log, TEXT("Added CustomEvent '%s' to Blueprint '%s' Event Graph"),
+		*EventName, *Blueprint->GetName());
+	return true;
+}
+
 // ===== Name Validation =====
 
 bool FBlueprintEditor::ValidateVariableName(const FString& VariableName, FString& OutError)
@@ -364,6 +430,59 @@ bool FBlueprintEditor::ParsePinType(
 	return false;
 }
 
+/**
+ * Splits the inner content of a TMap<...> string into its key and value type tokens.
+ *
+ * The split point is the first comma at brace depth 0, so nested containers such as
+ * "FName, TArray<int32>" are handled correctly: angle brackets are tracked to avoid
+ * splitting on commas that appear inside a nested template argument list.
+ *
+ * @param Inner      The string between the outer "TMap<" and ">", e.g. "FName, int32"
+ * @param OutKey     Receives the key type substring (not yet trimmed)
+ * @param OutValue   Receives the value type substring (not yet trimmed)
+ * @param OutError   Receives an error description when the function returns false
+ * @return true if a top-level comma was found and the split succeeded; false on error
+ */
+static bool SplitMapKeyValue(
+	const FString& Inner,
+	FString& OutKey,
+	FString& OutValue,
+	FString& OutError)
+{
+	// Walk the string tracking '<' / '>' nesting depth.
+	// The split comma must be at depth 0.
+	int32 Depth = 0;
+	int32 SplitIndex = INDEX_NONE;
+
+	for (int32 i = 0; i < Inner.Len(); ++i)
+	{
+		TCHAR Ch = Inner[i];
+		if (Ch == TEXT('<'))
+		{
+			++Depth;
+		}
+		else if (Ch == TEXT('>'))
+		{
+			--Depth;
+		}
+		else if (Ch == TEXT(',') && Depth == 0)
+		{
+			SplitIndex = i;
+			break; // First top-level comma is the key/value separator
+		}
+	}
+
+	if (SplitIndex == INDEX_NONE)
+	{
+		OutError = TEXT("TMap requires two type parameters separated by a comma, e.g. TMap<FName, int32>");
+		return false;
+	}
+
+	OutKey   = Inner.Left(SplitIndex);
+	OutValue = Inner.Mid(SplitIndex + 1);
+	return true;
+}
+
 bool FBlueprintEditor::ParseContainerType(
 	const FString& TypeString,
 	FEdGraphPinType& OutPinType,
@@ -394,6 +513,59 @@ bool FBlueprintEditor::ParseContainerType(
 		}
 		OutPinType = InnerPinType;
 		OutPinType.ContainerType = EPinContainerType::Set;
+		return true;
+	}
+
+	// TMap<KeyType, ValueType>
+	// Maps require two type parameters: the key drives the primary PinType fields and
+	// the value is stored in PinValueType (FEdGraphTerminalType). Neither the key nor
+	// the value may themselves be a container type — UE Blueprint enforces this.
+	if (TypeString.StartsWith(TEXT("TMap<")) && TypeString.EndsWith(TEXT(">")))
+	{
+		// Strip "TMap<" prefix and trailing ">"
+		FString Inner = TypeString.Mid(5, TypeString.Len() - 6);
+
+		FString KeyType, ValueType;
+		if (!SplitMapKeyValue(Inner, KeyType, ValueType, OutError))
+		{
+			return true; // Error set by SplitMapKeyValue
+		}
+
+		// Parse key type — becomes the primary PinType (PinCategory, PinSubCategory, etc.)
+		FEdGraphPinType KeyPinType;
+		if (!ParsePinType(KeyType.TrimStartAndEnd(), KeyPinType, OutError))
+		{
+			return true; // Error set
+		}
+
+		// Keys cannot be containers (UE Blueprint limitation)
+		if (KeyPinType.ContainerType != EPinContainerType::None)
+		{
+			OutError = TEXT("TMap key type cannot be a container");
+			return true;
+		}
+
+		// Parse value type — goes into PinValueType
+		FEdGraphPinType ValuePinType;
+		if (!ParsePinType(ValueType.TrimStartAndEnd(), ValuePinType, OutError))
+		{
+			return true; // Error set
+		}
+
+		// Values cannot be containers (UE Blueprint limitation)
+		if (ValuePinType.ContainerType != EPinContainerType::None)
+		{
+			OutError = TEXT("TMap value type cannot be a container");
+			return true;
+		}
+
+		// Assemble the final pin type.
+		// The key occupies the primary fields; the value is packed into PinValueType
+		// using the FEdGraphTerminalType::FromPinType static helper.
+		OutPinType = KeyPinType;
+		OutPinType.ContainerType = EPinContainerType::Map;
+		OutPinType.PinValueType = FEdGraphTerminalType::FromPinType(ValuePinType);
+
 		return true;
 	}
 
@@ -457,6 +629,29 @@ bool FBlueprintEditor::ParseStructType(
 
 FString FBlueprintEditor::PinTypeToString(const FEdGraphPinType& PinType)
 {
+	// TMap is handled separately: it has two distinct type components (key and value)
+	// that cannot be expressed with a simple prefix/suffix around a single base type.
+	// We reconstruct each side via recursive calls and early-return before the
+	// scalar/Array/Set path below.
+	if (PinType.ContainerType == EPinContainerType::Map)
+	{
+		// Reconstruct a key-only PinType from the primary fields (no container, no value).
+		FEdGraphPinType KeyOnlyType = PinType;
+		KeyOnlyType.ContainerType = EPinContainerType::None;
+		KeyOnlyType.PinValueType  = FEdGraphTerminalType();
+		FString KeyStr = PinTypeToString(KeyOnlyType);
+
+		// Reconstruct a scalar PinType from PinValueType terminal fields.
+		FEdGraphPinType ValueAsPinType;
+		ValueAsPinType.PinCategory          = PinType.PinValueType.TerminalCategory;
+		ValueAsPinType.PinSubCategory       = PinType.PinValueType.TerminalSubCategory;
+		ValueAsPinType.PinSubCategoryObject = PinType.PinValueType.TerminalSubCategoryObject;
+		ValueAsPinType.ContainerType        = EPinContainerType::None;
+		FString ValueStr = PinTypeToString(ValueAsPinType);
+
+		return FString::Printf(TEXT("TMap<%s, %s>"), *KeyStr, *ValueStr);
+	}
+
 	// Container prefix/suffix
 	FString Prefix, Suffix;
 	if (PinType.ContainerType == EPinContainerType::Array)

@@ -233,7 +233,7 @@ The plugin includes a Model Context Protocol (MCP) server with 30+ tools that ex
 **Tool Categories:**
 - **Actor Tools** - Spawn, move, delete, inspect, and set properties on actors
 - **Level Management** - Open levels, create new levels from templates, list available templates
-- **Blueprint Tools** - Create and modify Blueprints (variables, functions, nodes, pins)
+- **Blueprint Tools** - Create and modify Blueprints (variables, functions, custom events, nodes, pins); supports `DynamicCast` / `Knot` / `SwitchEnum` / `MakeArray` node types and `TMap<K,V>` pin types; cursor-driven auto-layout when `pos_x` / `pos_y` are omitted; all writes are wrapped in `FScopedTransaction` so they appear in Edit > Undo
 - **Animation Blueprint Tools** - Full state machine editing (states, transitions, conditions, batch operations)
 - **Asset Tools** - Search assets, query dependencies and referencers with pagination
 - **Character Tools** - Character configuration, movement settings, and data queries
@@ -401,6 +401,63 @@ Five compound tools ported from [VibeUE (MIT)](https://github.com/buckleybuilds/
 Load-bearing UE 5.7 quirks captured: `UGameplayAbility::AbilityTags` is deprecated → tags are written via `FStructProperty` reflection on the backing `AssetTags` field. `EGameplayModOp::Multiplicitive` (engine typo, **not** Multiplicative) is the correct enum spelling for multiply modifiers. `CancelAbilitiesWithTag` / `BlockAbilitiesWithTag` are `protected` in 5.7 and also written via `FindFProperty<FStructProperty>` + `ContainerPtrToValuePtr`. Every BP write wraps `FScopedTransaction` + `FKismetEditorUtilities::CompileBlueprint` + `MarkPackageDirty` so undo and asset-cache stay coherent.
 
 > Attribution: PR-G two tools adapted from [ue-mcp (BUSL-1.1)](https://github.com/davidlyon/ue-mcp) © 2024 David Lyon. BUSL-1.1 commercial use is project-owner authorized.
+
+#### Blueprint Authoring + Undo (added 2026-05-08)
+
+A round of Blueprint-graph improvements layered on top of the existing `blueprint_modify` tool. None of these changes alter the public schema beyond accepting new operation / node-type strings — existing callers keep working unchanged.
+
+**`add_custom_event` operation** — logic-light alternative to `add_function`:
+
+| Param | Purpose |
+|-------|---------|
+| `function_name` | Name of the new custom event (re-uses the same key as `add_function` so callers can swap ops without re-keying) |
+| `blueprint_path` | Standard Blueprint load context |
+
+Drops a `UK2Node_CustomEvent` directly into `UbergraphPages[0]` (the canonical Event Graph). This avoids the `FBlueprintEditorUtils::AddFunctionGraph` code path that has been observed to crash for `UWidgetBlueprint` on certain UE 5.7 builds. Suitable for UI button handlers and other fire-and-forget entry points that do not need parameter pins, return nodes, or recursion. Duplicate event names in the same graph are rejected.
+
+**New `add_node` types** — extends `node_type` beyond the original CallFunction / Branch / Event / VariableGet / VariableSet / Sequence / math set:
+
+| Node Type | Aliases | Required `node_params` |
+|-----------|---------|------------------------|
+| `DynamicCast` | `Cast` | `target_class` (short or path-qualified UClass name, e.g. `Pawn`, `PaogeCharacter`) |
+| `Knot` | `Reroute` | none — wire passthrough |
+| `SwitchEnum` | `Switch` | `enum` (short or path-qualified UEnum name; output pins reconstructed from enum values) |
+| `MakeArray` | — | `element_type` (optional; empty = wildcard, type inferred from first connection) |
+
+**Cursor-driven auto-layout** — `add_node` calls that omit BOTH `pos_x` and `pos_y` consume the session cursor's current slot, then advance X by 250 graph units. A sequence of position-less calls produces a left-to-right ribbon instead of stacking every node at `(0, 0)`. Switching graphs implicitly resets the cursor (the old program-counter id refers to a node in a different graph and would silently produce cross-graph wiring errors if reused).
+
+The cursor lives inside `UUMGSessionSubsystem` alongside the existing UMG anchor — the subsystem name is kept for backward source-compat but it now tracks two orthogonal session concerns:
+
+| State | Purpose |
+|-------|---------|
+| `CurrentTargetAssetPath` + `RecentlyEditedHistory` | UMG anchor (existing behavior — implicit `widget_blueprint_path`) |
+| `CurrentGraphName` + `bCurrentGraphIsFunction` | Anchored graph for cursor tracking |
+| `CurrentCursorNodeId` | Program-counter — id of the most recently added node |
+| `CurrentCursorPosition` | Visual cursor in graph-space coordinates |
+
+The `add_node` response is augmented with `pos_x` / `pos_y` (the resolved coordinates) and `used_cursor: bool` so callers can verify whether the cursor was consumed.
+
+**`TMap<K, V>` pin types** — `FBlueprintEditor::ParseContainerType` and `PinTypeToString` now round-trip map types. The key drives the primary `FEdGraphPinType` fields; the value is packed into `PinValueType` via `FEdGraphTerminalType::FromPinType`. Keys and values must both be scalar (UE Blueprint forbids nested containers in either slot — error is surfaced to the caller). Brace-depth-tracking comma split handles nested templates such as `TMap<FName, TArray<int32>>` correctly.
+
+**Undo / Redo via `FMCPScopedTransaction`** — a thin RAII wrapper around `FScopedTransaction` is now opened by every Blueprint-graph mutation:
+
+- `CreateNode` — wraps node creation; the `Graph->Modify()` and `NewNode->Modify()` calls record the pre-state
+- `DeleteNode` — wraps the destructive path; both graph and node `Modify()` are recorded before connection breaks
+- `ConnectPins` — opened after node validation (so aborted calls do not pollute the undo stack), before any pin mutation; both involved nodes `Modify()`
+- `DisconnectPins` — same shape as `ConnectPins`
+
+Result: every MCP write shows up as a labelled entry in Edit > Undo / Edit > Redo (e.g. `MCP: Create blueprint node`, `MCP: Connect blueprint pins`). Aborted operations that fail validation do not leave empty entries on the undo stack.
+
+**`asset` domain router split** — `tool-router.js` in the `mcp-bridge` submodule now dispatches the `asset` domain to two backing tools based on operation:
+
+| Backing Tool | Operations |
+|--------------|-----------|
+| `FMCPTool_Asset` (property / save / inspect) | `set_asset_property`, `save_asset`, `get_asset_info`, `list_assets` |
+| `FMCPTool_AssetManage` (CRUD / search / referencer-aware delete) | `search`, `find`, `list_folder`, `open_in_editor`, `save_all_dirty`, `duplicate`, `move`, `delete` |
+
+Caller-facing schema still advertises a single `asset` domain — the split is internal. `delete` still requires `confirm_delete: true` and is blocked by referencers unless `force: true` is also passed.
+
+> Attribution: `add_custom_event` and the cursor-position model adapted from [UmgMcp (MIT)](https://github.com/winyunq/UnrealMotionGraphicsMCP) © 2025-2026 Winyunq. The original `UmgAttentionSubsystem` design merged into the existing `UUMGSessionSubsystem` rather than introducing a parallel subsystem.
 
 #### Dynamic UE 5.7 Context System
 

@@ -140,6 +140,17 @@ public:
 		return FBlueprintEditor::AddFunction(Blueprint, FunctionName, OutError);
 	}
 
+	// Custom Event entry in the Event Graph (see FBlueprintEditor::AddCustomEvent).
+	// Parallel to AddFunction; intended for logic-light callers (UI handlers, etc.)
+	// where AddFunctionGraph is overkill or has been observed to crash.
+	FORCEINLINE static bool AddCustomEvent(
+		UBlueprint* Blueprint,
+		const FString& EventName,
+		FString& OutError)
+	{
+		return FBlueprintEditor::AddCustomEvent(Blueprint, EventName, OutError);
+	}
+
 	FORCEINLINE static bool RemoveFunction(
 		UBlueprint* Blueprint,
 		const FString& FunctionName,

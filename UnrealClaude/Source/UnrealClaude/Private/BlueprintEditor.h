@@ -82,6 +82,39 @@ public:
 		FString& OutError
 	);
 
+	/**
+	 * Add a Custom Event node to the Blueprint's Event Graph (UbergraphPages[0]).
+	 *
+	 * Why this exists alongside AddFunction:
+	 * AddFunction creates a full FunctionGraph via FBlueprintEditorUtils::AddFunctionGraph,
+	 * which on some Unreal versions has been observed to crash for lightweight blueprints
+	 * (notably WidgetBlueprints). For "logic-light" callers that just need a named entry
+	 * point inside the Event Graph (e.g. a UI handler invoked from a button binding) a
+	 * UK2Node_CustomEvent is sufficient and avoids the AddFunctionGraph code path entirely.
+	 *
+	 * Steps:
+	 *   1. Validate Blueprint and event name.
+	 *   2. Locate UbergraphPages[0] (the canonical Event Graph). Fail if missing.
+	 *   3. Reject duplicates: scan existing UK2Node_CustomEvent nodes for the same name.
+	 *   4. Construct via FGraphNodeCreator<UK2Node_CustomEvent> and Finalize.
+	 *
+	 * Note: this does NOT create a UFunction graph. Callers that need a true function
+	 * (with parameter pins, return nodes, recursion) must continue to use AddFunction.
+	 *
+	 * @param Blueprint  Blueprint to modify (must be valid).
+	 * @param EventName  Identifier for the new custom event (validated as a function name).
+	 * @param OutError   Receives an explanatory error string on failure.
+	 * @return           true on success.
+	 *
+	 * Portions adapted from UmgMcp (MIT) (c) 2025-2026 Winyunq.
+	 * https://github.com/winyunq/UnrealMotionGraphicsMCP
+	 */
+	static bool AddCustomEvent(
+		UBlueprint* Blueprint,
+		const FString& EventName,
+		FString& OutError
+	);
+
 	// ===== Type Conversion =====
 
 	/**

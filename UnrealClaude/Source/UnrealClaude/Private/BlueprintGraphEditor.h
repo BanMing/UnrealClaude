@@ -61,6 +61,10 @@ public:
 	 * - "Sequence" - params: { num_outputs }
 	 * - "PrintString"
 	 * - "Add", "Subtract", "Multiply", "Divide"
+	 * - "DynamicCast" / "Cast" - params: { target_class }
+	 * - "Knot" / "Reroute"
+	 * - "SwitchEnum" / "Switch" - params: { enum }
+	 * - "MakeArray" - params: { element_type (optional) }
 	 *
 	 * @param Graph - Graph to add node to
 	 * @param NodeType - Type of node (case insensitive)
@@ -288,6 +292,51 @@ private:
 	static UEdGraphNode* CreateVariableSetNode(UEdGraph* Graph, UBlueprint* Blueprint, const FString& VariableName, int32 PosX, int32 PosY, FString& OutError);
 	static UEdGraphNode* CreateSequenceNode(UEdGraph* Graph, int32 NumOutputs, int32 PosX, int32 PosY, FString& OutError);
 	static UEdGraphNode* CreateMathNode(UEdGraph* Graph, const FString& MathOp, int32 PosX, int32 PosY, FString& OutError);
+
+	/**
+	 * Create a UK2Node_DynamicCast node targeting the given UClass.
+	 * @param Graph       - Graph to add the node to
+	 * @param ClassName   - Short or path-qualified UClass name (e.g. "Pawn", "PaogeCharacter")
+	 * @param PosX        - Node X position in the graph
+	 * @param PosY        - Node Y position in the graph
+	 * @param OutError    - Human-readable failure description if nullptr is returned
+	 * @return Created node, or nullptr on failure (class not found, etc.)
+	 */
+	static UEdGraphNode* CreateDynamicCastNode(UEdGraph* Graph, const FString& ClassName, int32 PosX, int32 PosY, FString& OutError);
+
+	/**
+	 * Create a UK2Node_Knot (reroute / wire passthrough) node.
+	 * No parameters are required beyond position.
+	 * @param Graph    - Graph to add the node to
+	 * @param PosX     - Node X position in the graph
+	 * @param PosY     - Node Y position in the graph
+	 * @param OutError - Unused for Knot nodes, kept for consistency
+	 * @return Created node (never fails unless Graph is null)
+	 */
+	static UEdGraphNode* CreateKnotNode(UEdGraph* Graph, int32 PosX, int32 PosY, FString& OutError);
+
+	/**
+	 * Create a UK2Node_SwitchEnum node and reconstruct its output pins from the enum values.
+	 * @param Graph    - Graph to add the node to
+	 * @param EnumName - Short or path-qualified UEnum name (e.g. "EBattleState")
+	 * @param PosX     - Node X position in the graph
+	 * @param PosY     - Node Y position in the graph
+	 * @param OutError - Human-readable failure description if nullptr is returned
+	 * @return Created node, or nullptr on failure (enum not found, etc.)
+	 */
+	static UEdGraphNode* CreateSwitchEnumNode(UEdGraph* Graph, const FString& EnumName, int32 PosX, int32 PosY, FString& OutError);
+
+	/**
+	 * Create a UK2Node_MakeArray node. The array element type is left as wildcard
+	 * when ElementType is empty; the editor infers the type from the first connection.
+	 * @param Graph       - Graph to add the node to
+	 * @param ElementType - Optional element type hint (e.g. "float", "int32"). Empty = wildcard.
+	 * @param PosX        - Node X position in the graph
+	 * @param PosY        - Node Y position in the graph
+	 * @param OutError    - Human-readable failure description if nullptr is returned
+	 * @return Created node, or nullptr on failure
+	 */
+	static UEdGraphNode* CreateMakeArrayNode(UEdGraph* Graph, const FString& ElementType, int32 PosX, int32 PosY, FString& OutError);
 
 	// ID prefix for node comments
 	static const FString NodeIdPrefix;
