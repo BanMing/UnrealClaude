@@ -293,10 +293,30 @@ FMCPToolResult FMCPTool_StateTreeModify::ExecuteAddTask(const TSharedRef<FJsonOb
 
     FStateTreeEditorNode NewTaskNode;
     NewTaskNode.Node.InitializeAs(TaskStruct);
+    NewTaskNode.ID = FGuid::NewGuid();
     if (FStateTreeTaskBase* Task = NewTaskNode.Node.GetMutablePtr<FStateTreeTaskBase>())
     {
         Task->Name = FName(*TaskName);
         Task->bTaskEnabled = true;
+
+        // Initialize InstanceData mirror — without this the StateTree
+        // compiler reports "Malformed task, missing instance value" and the
+        // task slot is dropped from the runtime arrays. Mirrors the canonical
+        // path at engine:
+        //   StateTreeEditorNodeUtils.cpp:688-703 (Cast<UScriptStruct> branch
+        //   uses Instance.InitializeAs; Cast<UClass> branch uses NewObject
+        //   into the EditorData outer).
+        if (const UStruct* InstanceType = Task->GetInstanceDataType())
+        {
+            if (const UScriptStruct* InstanceStruct = Cast<UScriptStruct>(InstanceType))
+            {
+                NewTaskNode.Instance.InitializeAs(InstanceStruct);
+            }
+            else if (const UClass* InstanceClass = Cast<UClass>(InstanceType))
+            {
+                NewTaskNode.InstanceObject = NewObject<UObject>(EditorData, InstanceClass);
+            }
+        }
     }
     TargetState->Tasks.Add(NewTaskNode);
 
