@@ -31,7 +31,7 @@ public:
 			FMCPToolParameter(TEXT("location"), TEXT("object"), TEXT("New location {x, y, z}. Omit to keep current."), false),
 			FMCPToolParameter(TEXT("rotation"), TEXT("object"), TEXT("New rotation {pitch, yaw, roll}. Omit to keep current."), false),
 			FMCPToolParameter(TEXT("scale"), TEXT("object"), TEXT("New scale {x, y, z}. Omit to keep current."), false),
-			FMCPToolParameter(TEXT("relative"), TEXT("boolean"), TEXT("If true, values are added to current transform instead of replacing"), false, TEXT("false"))
+			FMCPToolParameter(TEXT("relative"), TEXT("boolean"), TEXT("If true: location and rotation values are ADDED to current transform; scale values are MULTIPLIED with current scale. If false: all values replace current transform."), false, TEXT("false"))
 		};
 		Info.Annotations = FMCPToolAnnotations::Modifying();
 		return Info;

@@ -33,11 +33,9 @@ FMCPToolInfo FMCPTool_Material::GetInfo() const
 	Info.Name = TEXT("material");
 	Info.Description = TEXT("Material instance creation and assignment operations for meshes and actors");
 
-	// Parameters
 	Info.Parameters.Add(FMCPToolParameter(TEXT("operation"), TEXT("string"),
 		TEXT("Operation: create_material_instance, set_material_parameters, set_skeletal_mesh_material, set_actor_material, get_material_info"), true));
 
-	// create_material_instance params
 	Info.Parameters.Add(FMCPToolParameter(TEXT("asset_name"), TEXT("string"),
 		TEXT("Name for the new material instance asset (for create_material_instance)")));
 	Info.Parameters.Add(FMCPToolParameter(TEXT("parent_material"), TEXT("string"),
@@ -47,11 +45,9 @@ FMCPToolInfo FMCPTool_Material::GetInfo() const
 	Info.Parameters.Add(FMCPToolParameter(TEXT("parameters"), TEXT("object"),
 		TEXT("Material parameters to set: {scalars: {name: value}, vectors: {name: {r,g,b,a}}, textures: {name: path}}")));
 
-	// set_material_parameters params
 	Info.Parameters.Add(FMCPToolParameter(TEXT("material_instance_path"), TEXT("string"),
 		TEXT("Asset path to material instance (for set_material_parameters)")));
 
-	// set_skeletal_mesh_material params
 	Info.Parameters.Add(FMCPToolParameter(TEXT("skeletal_mesh_path"), TEXT("string"),
 		TEXT("Asset path to skeletal mesh (for set_skeletal_mesh_material)")));
 	Info.Parameters.Add(FMCPToolParameter(TEXT("material_slot"), TEXT("integer"),
@@ -59,11 +55,9 @@ FMCPToolInfo FMCPTool_Material::GetInfo() const
 	Info.Parameters.Add(FMCPToolParameter(TEXT("material_path"), TEXT("string"),
 		TEXT("Asset path to material to assign (for set_skeletal_mesh_material)")));
 
-	// set_actor_material params
 	Info.Parameters.Add(FMCPToolParameter(TEXT("actor_name"), TEXT("string"),
 		TEXT("Name or label of the actor to assign material to (for set_actor_material)")));
 
-	// get_material_info params
 	Info.Parameters.Add(FMCPToolParameter(TEXT("asset_path"), TEXT("string"),
 		TEXT("Asset path to material (for get_material_info)")));
 
@@ -111,7 +105,6 @@ FMCPToolResult FMCPTool_Material::Execute(const TSharedRef<FJsonObject>& Params)
 
 FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef<FJsonObject>& Params)
 {
-	// Extract required params
 	FString AssetName;
 	FString ParentMaterialPath;
 	TOptional<FMCPToolResult> Error;
@@ -125,13 +118,11 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 		return Error.GetValue();
 	}
 
-	// Validate paths
 	if (!ValidateBlueprintPathParam(ParentMaterialPath, Error))
 	{
 		return Error.GetValue();
 	}
 
-	// Get package path
 	FString PackagePath = Params->HasField(TEXT("package_path"))
 		? Params->GetStringField(TEXT("package_path"))
 		: TEXT("/Game/Materials/");
@@ -141,20 +132,17 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 		return Error.GetValue();
 	}
 
-	// Ensure package path ends with /
 	if (!PackagePath.EndsWith(TEXT("/")))
 	{
 		PackagePath += TEXT("/");
 	}
 
-	// Load parent material
 	UMaterialInterface* ParentMaterial = LoadObject<UMaterialInterface>(nullptr, *ParentMaterialPath);
 	if (!ParentMaterial)
 	{
 		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load parent material: %s"), *ParentMaterialPath));
 	}
 
-	// Create the package
 	FString FullPackagePath = PackagePath + AssetName;
 	UPackage* Package = CreatePackage(*FullPackagePath);
 	if (!Package)
@@ -162,7 +150,6 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to create package: %s"), *FullPackagePath));
 	}
 
-	// Create material instance using factory
 	UMaterialInstanceConstantFactoryNew* Factory = NewObject<UMaterialInstanceConstantFactoryNew>();
 	Factory->InitialParent = ParentMaterial;
 
@@ -182,7 +169,6 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 		return FMCPToolResult::Error(TEXT("Failed to create material instance"));
 	}
 
-	// Apply parameters if provided
 	if (Params->HasField(TEXT("parameters")))
 	{
 		const TSharedPtr<FJsonObject>* ParamsObj;
@@ -191,17 +177,15 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 			FString ParamError;
 			if (!ApplyParametersFromJson(MatInst, *ParamsObj, ParamError))
 			{
-				// Material was created but parameters failed - report warning
+				// Asset was successfully created; downgrade parameter failures to a log warning so caller still gets the new instance
 				UE_LOG(LogUnrealClaude, Warning, TEXT("Material instance created but some parameters failed: %s"), *ParamError);
 			}
 		}
 	}
 
-	// Notify asset registry
 	FAssetRegistryModule::AssetCreated(MatInst);
 	Package->MarkPackageDirty();
 
-	// Save the asset
 	FString PackageFileName = FPackageName::LongPackageNameToFilename(FullPackagePath, FPackageName::GetAssetPackageExtension());
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
@@ -212,7 +196,6 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 		return FMCPToolResult::Error(FString::Printf(TEXT("Material instance created but failed to save: %s"), *FullPackagePath));
 	}
 
-	// Build result
 	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
 	ResultData->SetStringField(TEXT("asset_path"), FullPackagePath);
 	ResultData->SetStringField(TEXT("asset_name"), AssetName);
@@ -227,52 +210,66 @@ FMCPToolResult FMCPTool_Material::ExecuteCreateMaterialInstance(const TSharedRef
 
 FMCPToolResult FMCPTool_Material::ExecuteSetMaterialParameters(const TSharedRef<FJsonObject>& Params)
 {
-	FString MaterialInstancePath;
-	TOptional<FMCPToolResult> Error;
-
-	if (!ExtractRequiredString(Params, TEXT("material_instance_path"), MaterialInstancePath, Error))
+	// Canonical is 'material_path' across the material domain. 'material_instance_path'
+	// is accepted for backward compat with a deprecation warning so callers converge.
+	TArray<FString> Warnings;
+	FString MaterialInstancePath = ExtractOptionalString(Params, TEXT("material_path"));
+	FString LegacyName;
+	const bool bAliasPresent = MaterialInstancePath.IsEmpty()
+		&& Params->TryGetStringField(TEXT("material_instance_path"), LegacyName)
+		&& !LegacyName.IsEmpty();
+	if (bAliasPresent)
 	{
-		return Error.GetValue();
+		MaterialInstancePath = LegacyName;
+		Warnings.Add(TEXT("Parameter 'material_instance_path' is deprecated — use 'material_path' (canonical across the material domain). Treating as alias for this call."));
 	}
+
+	auto WithWarnings = [&Warnings](FMCPToolResult R) -> FMCPToolResult
+	{
+		R.Warnings = Warnings;
+		return R;
+	};
+
+	if (MaterialInstancePath.IsEmpty())
+	{
+		return WithWarnings(FMCPToolResult::Error(TEXT("Missing required parameter: material_path")));
+	}
+
+	TOptional<FMCPToolResult> Error;
 	if (!ValidateBlueprintPathParam(MaterialInstancePath, Error))
 	{
-		return Error.GetValue();
+		return WithWarnings(Error.GetValue());
 	}
 
-	// Load material instance
 	UMaterialInstanceConstant* MatInst = LoadObject<UMaterialInstanceConstant>(nullptr, *MaterialInstancePath);
 	if (!MatInst)
 	{
-		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load material instance: %s"), *MaterialInstancePath));
+		return WithWarnings(FMCPToolResult::Error(FString::Printf(TEXT("Failed to load material instance: %s"), *MaterialInstancePath)));
 	}
 
-	// Get parameters
 	const TSharedPtr<FJsonObject>* ParamsObj;
 	if (!Params->TryGetObjectField(TEXT("parameters"), ParamsObj))
 	{
-		return FMCPToolResult::Error(TEXT("Missing required parameter: parameters"));
+		return WithWarnings(FMCPToolResult::Error(TEXT("Missing required parameter: parameters")));
 	}
 
-	// Apply parameters
 	FString ParamError;
 	if (!ApplyParametersFromJson(MatInst, *ParamsObj, ParamError))
 	{
-		return FMCPToolResult::Error(ParamError);
+		return WithWarnings(FMCPToolResult::Error(ParamError));
 	}
 
-	// Mark dirty and post edit
 	MatInst->PostEditChange();
 	MatInst->MarkPackageDirty();
 
-	// Build result
 	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
-	ResultData->SetStringField(TEXT("material_instance"), MaterialInstancePath);
+	ResultData->SetStringField(TEXT("material_path"), MaterialInstancePath);
 	ResultData->SetBoolField(TEXT("modified"), true);
 
-	return FMCPToolResult::Success(
+	return WithWarnings(FMCPToolResult::Success(
 		FString::Printf(TEXT("Updated parameters on material instance: %s"), *MaterialInstancePath),
 		ResultData
-	);
+	));
 }
 
 FMCPToolResult FMCPTool_Material::ExecuteSetSkeletalMeshMaterial(const TSharedRef<FJsonObject>& Params)
@@ -298,7 +295,6 @@ FMCPToolResult FMCPTool_Material::ExecuteSetSkeletalMeshMaterial(const TSharedRe
 		return Error.GetValue();
 	}
 
-	// Get slot index
 	int32 MaterialSlot = 0;
 	if (Params->HasField(TEXT("material_slot")))
 	{
@@ -309,21 +305,18 @@ FMCPToolResult FMCPTool_Material::ExecuteSetSkeletalMeshMaterial(const TSharedRe
 		}
 	}
 
-	// Load skeletal mesh
 	USkeletalMesh* SkeletalMesh = LoadObject<USkeletalMesh>(nullptr, *SkeletalMeshPath);
 	if (!SkeletalMesh)
 	{
 		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load skeletal mesh: %s"), *SkeletalMeshPath));
 	}
 
-	// Load material
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
 	if (!Material)
 	{
 		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load material: %s"), *MaterialPath));
 	}
 
-	// Check slot bounds
 	TArray<FSkeletalMaterial>& Materials = SkeletalMesh->GetMaterials();
 	if (MaterialSlot >= Materials.Num())
 	{
@@ -332,19 +325,15 @@ FMCPToolResult FMCPTool_Material::ExecuteSetSkeletalMeshMaterial(const TSharedRe
 			MaterialSlot, Materials.Num()));
 	}
 
-	// Store old material name for result
 	FString OldMaterialName = Materials[MaterialSlot].MaterialInterface
 		? Materials[MaterialSlot].MaterialInterface->GetName()
 		: TEXT("None");
 
-	// Set the material
 	Materials[MaterialSlot].MaterialInterface = Material;
 
-	// Notify and mark dirty
 	SkeletalMesh->PostEditChange();
 	SkeletalMesh->MarkPackageDirty();
 
-	// Build result
 	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
 	ResultData->SetStringField(TEXT("skeletal_mesh"), SkeletalMeshPath);
 	ResultData->SetNumberField(TEXT("slot"), MaterialSlot);
@@ -376,7 +365,6 @@ FMCPToolResult FMCPTool_Material::ExecuteSetActorMaterial(const TSharedRef<FJson
 		return Error.GetValue();
 	}
 
-	// Get optional slot index
 	int32 MaterialSlot = 0;
 	if (Params->HasField(TEXT("material_slot")))
 	{
@@ -387,21 +375,18 @@ FMCPToolResult FMCPTool_Material::ExecuteSetActorMaterial(const TSharedRef<FJson
 		}
 	}
 
-	// Validate editor context
 	UWorld* World = nullptr;
 	if (auto EditorError = ValidateEditorContext(World))
 	{
 		return EditorError.GetValue();
 	}
 
-	// Find actor
 	AActor* Actor = FindActorByNameOrLabel(World, ActorName);
 	if (!Actor)
 	{
 		return ActorNotFoundError(ActorName);
 	}
 
-	// Find first mesh component on actor
 	UMeshComponent* MeshComp = Actor->FindComponentByClass<UMeshComponent>();
 	if (!MeshComp)
 	{
@@ -409,7 +394,6 @@ FMCPToolResult FMCPTool_Material::ExecuteSetActorMaterial(const TSharedRef<FJson
 			TEXT("Actor '%s' has no mesh component"), *ActorName));
 	}
 
-	// Validate slot bounds
 	int32 NumMaterials = MeshComp->GetNumMaterials();
 	if (MaterialSlot >= NumMaterials)
 	{
@@ -418,24 +402,20 @@ FMCPToolResult FMCPTool_Material::ExecuteSetActorMaterial(const TSharedRef<FJson
 			MaterialSlot, NumMaterials));
 	}
 
-	// Load material
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
 	if (!Material)
 	{
 		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load material: %s"), *MaterialPath));
 	}
 
-	// Store old material name
 	UMaterialInterface* OldMaterial = MeshComp->GetMaterial(MaterialSlot);
 	FString OldMaterialName = OldMaterial ? OldMaterial->GetName() : TEXT("None");
 
-	// Set material on the component (runtime override)
+	// SetMaterial creates a per-instance runtime override; does not edit the asset
 	MeshComp->SetMaterial(MaterialSlot, Material);
 
-	// Mark dirty
 	MarkActorDirty(Actor);
 
-	// Build result
 	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
 	ResultData->SetStringField(TEXT("actor"), Actor->GetName());
 	ResultData->SetStringField(TEXT("component"), MeshComp->GetName());
@@ -453,31 +433,49 @@ FMCPToolResult FMCPTool_Material::ExecuteSetActorMaterial(const TSharedRef<FJson
 
 FMCPToolResult FMCPTool_Material::ExecuteGetMaterialInfo(const TSharedRef<FJsonObject>& Params)
 {
-	FString AssetPath;
-	TOptional<FMCPToolResult> Error;
-
-	if (!ExtractRequiredString(Params, TEXT("asset_path"), AssetPath, Error))
+	// Canonical is 'material_path' across the material domain. 'asset_path' kept as
+	// alias since this op originally followed the generic asset-tool naming.
+	TArray<FString> Warnings;
+	FString AssetPath = ExtractOptionalString(Params, TEXT("material_path"));
+	FString LegacyName;
+	const bool bAliasPresent = AssetPath.IsEmpty()
+		&& Params->TryGetStringField(TEXT("asset_path"), LegacyName)
+		&& !LegacyName.IsEmpty();
+	if (bAliasPresent)
 	{
-		return Error.GetValue();
+		AssetPath = LegacyName;
+		Warnings.Add(TEXT("Parameter 'asset_path' is deprecated for 'get_material_info' — use 'material_path' (canonical across the material domain). Treating as alias for this call."));
 	}
+
+	auto WithWarnings = [&Warnings](FMCPToolResult R) -> FMCPToolResult
+	{
+		R.Warnings = Warnings;
+		return R;
+	};
+
+	if (AssetPath.IsEmpty())
+	{
+		return WithWarnings(FMCPToolResult::Error(TEXT("Missing required parameter: material_path")));
+	}
+
+	TOptional<FMCPToolResult> Error;
 	if (!ValidateBlueprintPathParam(AssetPath, Error))
 	{
-		return Error.GetValue();
+		return WithWarnings(Error.GetValue());
 	}
 
-	// Load material
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *AssetPath);
 	if (!Material)
 	{
-		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load material: %s"), *AssetPath));
+		return WithWarnings(FMCPToolResult::Error(FString::Printf(TEXT("Failed to load material: %s"), *AssetPath)));
 	}
 
 	TSharedPtr<FJsonObject> ResultData = BuildMaterialInfoJson(Material);
 
-	return FMCPToolResult::Success(
+	return WithWarnings(FMCPToolResult::Success(
 		FString::Printf(TEXT("Material info: %s"), *Material->GetName()),
 		ResultData
-	);
+	));
 }
 
 bool FMCPTool_Material::SetScalarParameter(UMaterialInstanceConstant* MatInst, const FString& ParamName, float Value, FString& OutError)
@@ -534,7 +532,6 @@ bool FMCPTool_Material::ApplyParametersFromJson(UMaterialInstanceConstant* MatIn
 	bool bAllSuccess = true;
 	TArray<FString> Errors;
 
-	// Process scalar parameters
 	const TSharedPtr<FJsonObject>* ScalarsObj;
 	if (ParamsObj->TryGetObjectField(TEXT("scalars"), ScalarsObj))
 	{
@@ -553,7 +550,6 @@ bool FMCPTool_Material::ApplyParametersFromJson(UMaterialInstanceConstant* MatIn
 		}
 	}
 
-	// Process vector parameters
 	const TSharedPtr<FJsonObject>* VectorsObj;
 	if (ParamsObj->TryGetObjectField(TEXT("vectors"), VectorsObj))
 	{
@@ -579,7 +575,6 @@ bool FMCPTool_Material::ApplyParametersFromJson(UMaterialInstanceConstant* MatIn
 		}
 	}
 
-	// Process texture parameters
 	const TSharedPtr<FJsonObject>* TexturesObj;
 	if (ParamsObj->TryGetObjectField(TEXT("textures"), TexturesObj))
 	{
@@ -614,7 +609,6 @@ TSharedPtr<FJsonObject> FMCPTool_Material::BuildMaterialInfoJson(UMaterialInterf
 	Info->SetStringField(TEXT("path"), Material->GetPathName());
 	Info->SetStringField(TEXT("class"), Material->GetClass()->GetName());
 
-	// Check if it's a material instance
 	if (UMaterialInstance* MatInst = Cast<UMaterialInstance>(Material))
 	{
 		Info->SetBoolField(TEXT("is_instance"), true);
@@ -623,7 +617,6 @@ TSharedPtr<FJsonObject> FMCPTool_Material::BuildMaterialInfoJson(UMaterialInterf
 			Info->SetStringField(TEXT("parent"), MatInst->Parent->GetPathName());
 		}
 
-		// Add scalar parameters
 		TSharedPtr<FJsonObject> ScalarsObj = MakeShared<FJsonObject>();
 		for (const FScalarParameterValue& Param : MatInst->ScalarParameterValues)
 		{
@@ -631,7 +624,6 @@ TSharedPtr<FJsonObject> FMCPTool_Material::BuildMaterialInfoJson(UMaterialInterf
 		}
 		Info->SetObjectField(TEXT("scalar_parameters"), ScalarsObj);
 
-		// Add vector parameters
 		TSharedPtr<FJsonObject> VectorsObj = MakeShared<FJsonObject>();
 		for (const FVectorParameterValue& Param : MatInst->VectorParameterValues)
 		{
@@ -644,7 +636,6 @@ TSharedPtr<FJsonObject> FMCPTool_Material::BuildMaterialInfoJson(UMaterialInterf
 		}
 		Info->SetObjectField(TEXT("vector_parameters"), VectorsObj);
 
-		// Add texture parameters
 		TSharedPtr<FJsonObject> TexturesObj = MakeShared<FJsonObject>();
 		for (const FTextureParameterValue& Param : MatInst->TextureParameterValues)
 		{
@@ -670,7 +661,6 @@ TArray<TSharedPtr<FJsonValue>> FMCPTool_Material::GetMaterialParameters(UMateria
 		return Params;
 	}
 
-	// Get all parameter names from the material
 	TArray<FMaterialParameterInfo> ScalarParams;
 	TArray<FGuid> ScalarGuids;
 	Material->GetAllScalarParameterInfo(ScalarParams, ScalarGuids);

@@ -218,4 +218,106 @@ bool FMCPTool_AnimBlueprintModify_BulkOps_Security_BlocksPathTraversal::RunTest(
 	return true;
 }
 
+// ===== Variable Param Alias Tests (var_name → variable_name) =====
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_AnimBlueprintModify_AddVariable_VarNameAlias,
+	"UnrealClaude.MCP.Tools.AnimBlueprintModify.Aliases.AddVariableVarNameWarns",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_AnimBlueprintModify_AddVariable_VarNameAlias::RunTest(const FString& Parameters)
+{
+	FMCPTool_AnimBlueprintModify Tool;
+
+	// Pass deprecated var_name/var_type — the BP load will fail (test path doesn't exist)
+	// but the alias warnings should still attach to the error result.
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("blueprint_path"), TEXT("/Game/Test/ABP_Test"));
+	Params->SetStringField(TEXT("operation"), TEXT("add_variable"));
+	Params->SetStringField(TEXT("var_name"), TEXT("Speed"));
+	Params->SetStringField(TEXT("var_type"), TEXT("float"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail (BP path does not exist)", Result.bSuccess);
+	TestTrue("Should emit warnings even on early failure", Result.Warnings.Num() >= 2);
+
+	bool bWarnsVarName = false;
+	bool bWarnsVarType = false;
+	for (const FString& W : Result.Warnings)
+	{
+		if (W.Contains(TEXT("var_name")) && W.Contains(TEXT("variable_name"))) bWarnsVarName = true;
+		if (W.Contains(TEXT("var_type")) && W.Contains(TEXT("variable_type"))) bWarnsVarType = true;
+	}
+	TestTrue("Warning should mention var_name → variable_name", bWarnsVarName);
+	TestTrue("Warning should mention var_type → variable_type", bWarnsVarType);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_AnimBlueprintModify_RemoveVariable_VarNameAlias,
+	"UnrealClaude.MCP.Tools.AnimBlueprintModify.Aliases.RemoveVariableVarNameWarns",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_AnimBlueprintModify_RemoveVariable_VarNameAlias::RunTest(const FString& Parameters)
+{
+	FMCPTool_AnimBlueprintModify Tool;
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("blueprint_path"), TEXT("/Game/Test/ABP_Test"));
+	Params->SetStringField(TEXT("operation"), TEXT("remove_variable"));
+	Params->SetStringField(TEXT("var_name"), TEXT("Speed"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail (BP path does not exist)", Result.bSuccess);
+	TestTrue("Should emit alias warning even on early failure", Result.Warnings.Num() >= 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_AnimBlueprintModify_SetVariableDefault_VarNameAlias,
+	"UnrealClaude.MCP.Tools.AnimBlueprintModify.Aliases.SetVariableDefaultVarNameWarns",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_AnimBlueprintModify_SetVariableDefault_VarNameAlias::RunTest(const FString& Parameters)
+{
+	FMCPTool_AnimBlueprintModify Tool;
+
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("blueprint_path"), TEXT("/Game/Test/ABP_Test"));
+	Params->SetStringField(TEXT("operation"), TEXT("set_variable_default"));
+	Params->SetStringField(TEXT("var_name"), TEXT("Speed"));
+	Params->SetStringField(TEXT("default_value"), TEXT("42.0"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail (BP path does not exist)", Result.bSuccess);
+	TestTrue("Should emit alias warning even on early failure", Result.Warnings.Num() >= 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_AnimBlueprintModify_AddVariable_CanonicalNoWarn,
+	"UnrealClaude.MCP.Tools.AnimBlueprintModify.Aliases.CanonicalNamesNoWarn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_AnimBlueprintModify_AddVariable_CanonicalNoWarn::RunTest(const FString& Parameters)
+{
+	FMCPTool_AnimBlueprintModify Tool;
+
+	// Canonical names should produce zero alias warnings (BP load still fails — unrelated).
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("blueprint_path"), TEXT("/Game/Test/ABP_Test"));
+	Params->SetStringField(TEXT("operation"), TEXT("add_variable"));
+	Params->SetStringField(TEXT("variable_name"), TEXT("Speed"));
+	Params->SetStringField(TEXT("variable_type"), TEXT("float"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail (BP path does not exist)", Result.bSuccess);
+	TestEqual("Canonical names should not produce alias warnings", Result.Warnings.Num(), 0);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

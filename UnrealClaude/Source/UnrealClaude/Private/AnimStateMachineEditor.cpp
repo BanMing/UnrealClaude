@@ -39,7 +39,6 @@ UAnimGraphNode_StateMachine* FAnimStateMachineEditor::CreateStateMachine(
 		return nullptr;
 	}
 
-	// Get or create the AnimGraph
 	TArray<UEdGraph*> AnimGraphs;
 	AnimBP->GetAllGraphs(AnimGraphs);
 
@@ -59,7 +58,6 @@ UAnimGraphNode_StateMachine* FAnimStateMachineEditor::CreateStateMachine(
 		return nullptr;
 	}
 
-	// Create the state machine node
 	FGraphNodeCreator<UAnimGraphNode_StateMachine> NodeCreator(*AnimGraph);
 	UAnimGraphNode_StateMachine* StateMachineNode = NodeCreator.CreateNode();
 
@@ -72,12 +70,10 @@ UAnimGraphNode_StateMachine* FAnimStateMachineEditor::CreateStateMachine(
 	StateMachineNode->NodePosX = static_cast<int32>(Position.X);
 	StateMachineNode->NodePosY = static_cast<int32>(Position.Y);
 
-	// Set the name
 	StateMachineNode->OnRenameNode(StateMachineName);
 
 	NodeCreator.Finalize();
 
-	// Create the internal state machine graph
 	UAnimationStateMachineGraph* SMGraph = CastChecked<UAnimationStateMachineGraph>(
 		FBlueprintEditorUtils::CreateNewGraph(
 			StateMachineNode,
@@ -96,14 +92,11 @@ UAnimGraphNode_StateMachine* FAnimStateMachineEditor::CreateStateMachine(
 		Schema->CreateDefaultNodesForGraph(*SMGraph);
 	}
 
-	// Set the owner reference
 	SMGraph->OwnerAnimGraphNode = StateMachineNode;
 
-	// Generate node ID
 	OutNodeId = FString::Printf(TEXT("StateMachine_%s"), *StateMachineName.Replace(TEXT(" "), TEXT("_")));
 	SetNodeId(StateMachineNode, OutNodeId);
 
-	// Mark dirty
 	AnimGraph->Modify();
 	AnimBP->Modify();
 
@@ -124,26 +117,52 @@ UAnimGraphNode_StateMachine* FAnimStateMachineEditor::FindStateMachine(
 	TArray<UEdGraph*> AllGraphs;
 	AnimBP->GetAllGraphs(AllGraphs);
 
+	// Two-pass resolver: prefer match on bound graph name (canonical), then fall back
+	// to the user-friendly node id surfaced by get_info (NodeComment-encoded prefix).
+	// Closes the trap where get_info returned both `name` and `node_id` but only `name`
+	// resolved here, so users reaching for the friendlier node_id got a not-found error.
+	UAnimGraphNode_StateMachine* NodeIdMatch = nullptr;
 	for (UEdGraph* Graph : AllGraphs)
 	{
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
 			if (UAnimGraphNode_StateMachine* SMNode = Cast<UAnimGraphNode_StateMachine>(Node))
 			{
-				FString NodeName = SMNode->GetStateMachineName();
-				if (NodeName.Equals(StateMachineName, ESearchCase::IgnoreCase))
+				if (SMNode->GetStateMachineName().Equals(StateMachineName, ESearchCase::IgnoreCase))
 				{
 					return SMNode;
+				}
+				if (!NodeIdMatch)
+				{
+					const FString NodeId = GetNodeId(SMNode);
+					if (!NodeId.IsEmpty() && NodeId.Equals(StateMachineName, ESearchCase::IgnoreCase))
+					{
+						NodeIdMatch = SMNode;
+					}
 				}
 			}
 		}
 	}
 
-	// Get available names for error message
-	TArray<FString> AvailableNames = GetStateMachineNames(AnimBP);
+	if (NodeIdMatch)
+	{
+		return NodeIdMatch;
+	}
+
+	// Pair-style listing so the error message tells users both identifiers they can pass.
+	TArray<UAnimGraphNode_StateMachine*> SMs = GetAllStateMachines(AnimBP);
+	TArray<FString> Pairs;
+	for (UAnimGraphNode_StateMachine* SM : SMs)
+	{
+		const FString GraphName = SM->GetStateMachineName();
+		const FString NodeId = GetNodeId(SM);
+		Pairs.Add(NodeId.IsEmpty()
+			? GraphName
+			: FString::Printf(TEXT("%s (or %s)"), *GraphName, *NodeId));
+	}
 	OutError = FString::Printf(TEXT("State machine '%s' not found. Available: %s"),
 		*StateMachineName,
-		AvailableNames.Num() > 0 ? *FString::Join(AvailableNames, TEXT(", ")) : TEXT("(none)"));
+		Pairs.Num() > 0 ? *FString::Join(Pairs, TEXT(", ")) : TEXT("(none)"));
 
 	return nullptr;
 }
@@ -281,7 +300,6 @@ UAnimStateNode* FAnimStateMachineEditor::AddState(
 
 	UAnimStateNode* State = AddState(SM, StateName, Position, OutNodeId, OutError);
 
-	// If bIsEntryState, set this state as the entry state
 	if (State && bIsEntryState)
 	{
 		FString EntryError;
@@ -313,14 +331,12 @@ UAnimStateNode* FAnimStateMachineEditor::AddState(
 		return nullptr;
 	}
 
-	// Check if state already exists
 	if (FindStateNodeInGraph(SMGraph, StateName))
 	{
 		OutError = FString::Printf(TEXT("State '%s' already exists"), *StateName);
 		return nullptr;
 	}
 
-	// Create state node using the schema action
 	FGraphNodeCreator<UAnimStateNode> NodeCreator(*SMGraph);
 	UAnimStateNode* StateNode = NodeCreator.CreateNode();
 
@@ -357,7 +373,6 @@ UAnimStateNode* FAnimStateMachineEditor::AddState(
 		Schema->CreateDefaultNodesForGraph(*StateGraph);
 	}
 
-	// Verify the result node was created
 	bool bHasResultNode = false;
 	for (UEdGraphNode* Node : StateGraph->Nodes)
 	{
@@ -381,11 +396,9 @@ UAnimStateNode* FAnimStateMachineEditor::AddState(
 		}
 	}
 
-	// Generate and set node ID
 	OutNodeId = GenerateStateNodeId(StateName, SMGraph);
 	SetNodeId(StateNode, OutNodeId);
 
-	// Mark dirty
 	SMGraph->Modify();
 	StateGraph->Modify();
 
@@ -421,13 +434,12 @@ bool FAnimStateMachineEditor::RemoveState(
 		return false;
 	}
 
-	// Remove all connected transitions first
+	// Must remove connected transitions before the state, or transitions will dangle
 	TArray<UEdGraphNode*> NodesToRemove;
 	for (UEdGraphNode* Node : SMGraph->Nodes)
 	{
 		if (UAnimStateTransitionNode* TransNode = Cast<UAnimStateTransitionNode>(Node))
 		{
-			// Check if this transition connects to/from our state
 			UAnimStateNodeBase* PrevState = TransNode->GetPreviousState();
 			UAnimStateNodeBase* NextState = TransNode->GetNextState();
 
@@ -438,13 +450,11 @@ bool FAnimStateMachineEditor::RemoveState(
 		}
 	}
 
-	// Remove transitions
 	for (UEdGraphNode* Node : NodesToRemove)
 	{
 		SMGraph->RemoveNode(Node);
 	}
 
-	// Remove the state
 	SMGraph->RemoveNode(StateNode);
 	SMGraph->Modify();
 
@@ -579,11 +589,10 @@ bool FAnimStateMachineEditor::SetEntryState(
 		return false;
 	}
 
-	// Find the entry node
+	// Fallback to scanning Nodes if EntryNode field is unset (older AnimBP saves)
 	UAnimStateEntryNode* EntryNode = SMGraph->EntryNode;
 	if (!EntryNode)
 	{
-		// Try to find entry node in graph nodes
 		for (UEdGraphNode* Node : SMGraph->Nodes)
 		{
 			if (UAnimStateEntryNode* FoundEntry = Cast<UAnimStateEntryNode>(Node))
@@ -600,7 +609,6 @@ bool FAnimStateMachineEditor::SetEntryState(
 		return false;
 	}
 
-	// Find the target state
 	UAnimStateNode* TargetState = FindStateNodeInGraph(SMGraph, StateName);
 	if (!TargetState)
 	{
@@ -608,7 +616,6 @@ bool FAnimStateMachineEditor::SetEntryState(
 		return false;
 	}
 
-	// Find the entry node's output pin
 	UEdGraphPin* EntryOutputPin = nullptr;
 	for (UEdGraphPin* Pin : EntryNode->Pins)
 	{
@@ -625,7 +632,6 @@ bool FAnimStateMachineEditor::SetEntryState(
 		return false;
 	}
 
-	// Find the target state's input pin
 	UEdGraphPin* StateInputPin = nullptr;
 	for (UEdGraphPin* Pin : TargetState->Pins)
 	{
@@ -642,10 +648,8 @@ bool FAnimStateMachineEditor::SetEntryState(
 		return false;
 	}
 
-	// Break existing entry connections
+	// Break existing entry connections before linking the new target
 	EntryOutputPin->BreakAllPinLinks();
-
-	// Connect entry to the new target state
 	EntryOutputPin->MakeLinkTo(StateInputPin);
 	SMGraph->Modify();
 
@@ -666,7 +670,6 @@ FString FAnimStateMachineEditor::GetEntryStateName(UAnimGraphNode_StateMachine* 
 		return FString();
 	}
 
-	// Find the entry node
 	UAnimStateEntryNode* EntryNode = SMGraph->EntryNode;
 	if (!EntryNode)
 	{
@@ -685,7 +688,6 @@ FString FAnimStateMachineEditor::GetEntryStateName(UAnimGraphNode_StateMachine* 
 		return FString();
 	}
 
-	// Find what state the entry is connected to
 	for (UEdGraphPin* Pin : EntryNode->Pins)
 	{
 		if (Pin->Direction == EGPD_Output && Pin->LinkedTo.Num() > 0)
@@ -750,26 +752,23 @@ UAnimStateTransitionNode* FAnimStateMachineEditor::CreateTransition(
 		return nullptr;
 	}
 
-	// Find source and target states
 	UAnimStateNode* SourceState = FindState(StateMachine, FromState, OutError);
 	if (!SourceState) return nullptr;
 
 	UAnimStateNode* TargetState = FindState(StateMachine, ToState, OutError);
 	if (!TargetState) return nullptr;
 
-	// Check if transition already exists
 	UAnimStateTransitionNode* ExistingTransition = FindTransition(StateMachine, FromState, ToState, OutError);
 	if (ExistingTransition)
 	{
 		OutError = FString::Printf(TEXT("Transition from '%s' to '%s' already exists"), *FromState, *ToState);
 		return nullptr;
 	}
-	OutError.Empty(); // Clear error from FindTransition
+	OutError.Empty(); // FindTransition sets error when none found; clear it for the success path
 
 	UAnimationStateMachineGraph* SMGraph = GetStateMachineGraph(StateMachine, OutError);
 	if (!SMGraph) return nullptr;
 
-	// Create transition node
 	FGraphNodeCreator<UAnimStateTransitionNode> NodeCreator(*SMGraph);
 	UAnimStateTransitionNode* TransitionNode = NodeCreator.CreateNode();
 
@@ -779,16 +778,14 @@ UAnimStateTransitionNode* FAnimStateMachineEditor::CreateTransition(
 		return nullptr;
 	}
 
-	// Position between the two states
+	// Position transition midpoint between the two states
 	TransitionNode->NodePosX = (SourceState->NodePosX + TargetState->NodePosX) / 2;
 	TransitionNode->NodePosY = (SourceState->NodePosY + TargetState->NodePosY) / 2;
 
 	NodeCreator.Finalize();
 
-	// Connect the transition to states
 	ConnectStateNodes(SourceState, TargetState, TransitionNode);
 
-	// Create the transition rule graph
 	UAnimationTransitionGraph* TransitionGraph = CastChecked<UAnimationTransitionGraph>(
 		FBlueprintEditorUtils::CreateNewGraph(
 			TransitionNode,
@@ -806,7 +803,6 @@ UAnimStateTransitionNode* FAnimStateMachineEditor::CreateTransition(
 		Schema->CreateDefaultNodesForGraph(*TransitionGraph);
 	}
 
-	// Verify the result node was created
 	bool bHasResultNode = false;
 	for (UEdGraphNode* Node : TransitionGraph->Nodes)
 	{
@@ -830,7 +826,6 @@ UAnimStateTransitionNode* FAnimStateMachineEditor::CreateTransition(
 		}
 	}
 
-	// Generate and set node ID
 	OutNodeId = GenerateTransitionNodeId(FromState, ToState, SMGraph);
 	SetNodeId(TransitionNode, OutNodeId);
 
@@ -865,10 +860,8 @@ bool FAnimStateMachineEditor::RemoveTransition(
 	UAnimationStateMachineGraph* SMGraph = GetStateMachineGraph(StateMachine, OutError);
 	if (!SMGraph) return false;
 
-	// Break all pin links
 	TransitionNode->BreakAllNodeLinks();
 
-	// Remove the node
 	SMGraph->RemoveNode(TransitionNode);
 	SMGraph->Modify();
 
@@ -1060,7 +1053,6 @@ TSharedPtr<FJsonObject> FAnimStateMachineEditor::SerializeStateMachineInfo(
 	// Resolvable ID for pre-existing state-machine nodes without mutating NodeComment.
 	Json->SetStringField(TEXT("node_id"), GetNodeIdOrName(StateMachine));
 
-	// Add state list
 	TArray<TSharedPtr<FJsonValue>> StatesArray;
 	TArray<FString> StateNames = GetStateNames(StateMachine);
 	for (const FString& Name : StateNames)
@@ -1119,7 +1111,6 @@ FString FAnimStateMachineEditor::GenerateStateNodeId(const FString& StateName, U
 	FString SafeName = StateName.Replace(TEXT(" "), TEXT("_"));
 	FString NodeId = FString::Printf(TEXT("State_%s_%d"), *SafeName, Counter);
 
-	// Verify uniqueness
 	if (Graph)
 	{
 		bool bUnique = true;
@@ -1149,7 +1140,6 @@ FString FAnimStateMachineEditor::GenerateTransitionNodeId(const FString& FromSta
 	FString SafeTo = ToState.Replace(TEXT(" "), TEXT("_"));
 	FString NodeId = FString::Printf(TEXT("Transition_%s_To_%s_%d"), *SafeFrom, *SafeTo, Counter);
 
-	// Verify uniqueness
 	if (Graph)
 	{
 		bool bUnique = true;
@@ -1232,25 +1222,17 @@ void FAnimStateMachineEditor::ConnectStateNodes(UAnimStateNode* FromState, UAnim
 {
 	if (!FromState || !ToState || !Transition) return;
 
-	// Get the output pin from source state
 	UEdGraphPin* SourceOutputPin = FromState->GetOutputPin();
-
-	// Get the input pin from transition
 	UEdGraphPin* TransitionInputPin = Transition->GetInputPin();
 
-	// Connect source to transition
 	if (SourceOutputPin && TransitionInputPin)
 	{
 		SourceOutputPin->MakeLinkTo(TransitionInputPin);
 	}
 
-	// Get the output pin from transition
 	UEdGraphPin* TransitionOutputPin = Transition->GetOutputPin();
-
-	// Get the input pin from target state
 	UEdGraphPin* TargetInputPin = ToState->GetInputPin();
 
-	// Connect transition to target
 	if (TransitionOutputPin && TargetInputPin)
 	{
 		TransitionOutputPin->MakeLinkTo(TargetInputPin);

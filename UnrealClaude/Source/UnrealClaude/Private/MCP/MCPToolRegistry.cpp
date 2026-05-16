@@ -6,7 +6,6 @@
 #include "UnrealClaudeConstants.h"
 #include "Containers/Ticker.h"
 
-// Include all tool implementations
 #include "Tools/MCPTool_SpawnActor.h"
 #include "Tools/MCPTool_GetLevelActors.h"
 #include "Tools/MCPTool_SetProperty.h"
@@ -60,7 +59,6 @@
 #include "Tools/MCPTool_NiagaraModify.h"
 #include "Tools/MCPTool_GASModify.h"
 
-// Task queue tools
 #include "Tools/MCPTool_TaskSubmit.h"
 #include "Tools/MCPTool_TaskStatus.h"
 #include "Tools/MCPTool_TaskResult.h"
@@ -98,7 +96,6 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 {
 	UE_LOG(LogUnrealClaude, Log, TEXT("Registering MCP tools..."));
 
-	// Register all built-in tools
 	RegisterTool(MakeShared<FMCPTool_SpawnActor>());
 	RegisterTool(MakeShared<FMCPTool_GetLevelActors>());
 	RegisterTool(MakeShared<FMCPTool_SetProperty>());
@@ -107,12 +104,10 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 	RegisterTool(MakeShared<FMCPTool_MoveActor>());
 	RegisterTool(MakeShared<FMCPTool_GetOutputLog>());
 
-	// Script execution tools
 	RegisterTool(MakeShared<FMCPTool_ExecuteScript>());
 	RegisterTool(MakeShared<FMCPTool_CleanupScripts>());
 	RegisterTool(MakeShared<FMCPTool_GetScriptHistory>());
 
-	// Viewport capture
 	RegisterTool(MakeShared<FMCPTool_CaptureViewport>());
 
 	// PIE screenshot with UMG composition (Sprint 6 6-2 W2-EXIT closure)
@@ -125,24 +120,19 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 	RegisterTool(MakeShared<FMCPTool_BlueprintModify>());
 	RegisterTool(MakeShared<FMCPTool_AnimBlueprintModify>());
 
-	// Asset tools
 	RegisterTool(MakeShared<FMCPTool_AssetSearch>());
 	RegisterTool(MakeShared<FMCPTool_AssetDependencies>());
 	RegisterTool(MakeShared<FMCPTool_AssetReferencers>());
 
-	// Enhanced Input tools
 	RegisterTool(MakeShared<FMCPTool_EnhancedInput>());
 
-	// Character tools
 	RegisterTool(MakeShared<FMCPTool_Character>());
 	RegisterTool(MakeShared<FMCPTool_CharacterData>());
 	RegisterTool(MakeShared<FMCPTool_GenericDataTable>());
 
-	// Material and Asset tools
 	RegisterTool(MakeShared<FMCPTool_Material>());
 	RegisterTool(MakeShared<FMCPTool_Asset>());
 
-	// Level management tools
 	RegisterTool(MakeShared<FMCPTool_OpenLevel>());
 
 	// UMG widget tools (Story 1: UMG CRUD — adapted from UmgMcp MIT)
@@ -252,13 +242,11 @@ void FMCPToolRegistry::InvalidateToolCache()
 
 TArray<FMCPToolInfo> FMCPToolRegistry::GetAllTools() const
 {
-	// Return cached result if valid
 	if (bCacheValid)
 	{
 		return CachedToolInfo;
 	}
 
-	// Rebuild cache
 	CachedToolInfo.Empty(Tools.Num());
 	for (const auto& Pair : Tools)
 	{
@@ -320,7 +308,6 @@ FMCPToolResult FMCPToolRegistry::ExecuteTool(const FString& ToolName, const TSha
 			return FMCPToolResult::Error(FString::Printf(TEXT("Tool execution timed out after %d seconds"), TimeoutMs / 1000));
 		}
 
-		// Copy result from shared storage
 		Result = *SharedResult;
 	}
 

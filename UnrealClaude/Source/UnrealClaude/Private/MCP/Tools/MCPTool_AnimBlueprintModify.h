@@ -54,6 +54,17 @@
  * - Or: Boolean OR (inputs: A, B; output: bool)
  * - Not: Boolean NOT (input: A; output: bool)
  * - GetVariable: Get blueprint variable (node_params: {variable_name})
+ *
+ * Variable + Compile Operations (NEW):
+ * - add_variable: Add a member variable to the AnimBlueprint (optional default_value)
+ * - set_variable_default: Change an existing variable's default value
+ * - remove_variable: Remove a member variable
+ * - compile: Compile the AnimBlueprint and return any errors/warnings
+ *
+ * State Machine Enumeration (NEW):
+ * - get_states: List all states in a state machine
+ * - get_transitions: List all transitions in a state machine
+ * - get_conduits: List all conduits in a state machine
  */
 class FMCPTool_AnimBlueprintModify : public FMCPToolBase
 {
@@ -92,7 +103,16 @@ public:
 			"Animation Assignment:\n"
 			"- 'set_state_animation': Assign AnimSequence, BlendSpace, BlendSpace1D, or Montage\n"
 			"- 'find_animations': Search compatible animation assets\n\n"
-			"- 'batch': Execute multiple operations atomically"
+			"- 'batch': Execute multiple operations atomically\n\n"
+			"Variable + Compile (NEW):\n"
+			"- 'add_variable': Add a member variable (params: variable_name, variable_type, optional default_value)\n"
+			"- 'set_variable_default': Change an existing variable's default value (params: variable_name, default_value)\n"
+			"- 'remove_variable': Remove a member variable (params: variable_name)\n"
+			"- 'compile': Compile the AnimBlueprint and return errors/warnings\n\n"
+			"State Machine Enumeration (NEW):\n"
+			"- 'get_states': List all states in a state machine (params: state_machine)\n"
+			"- 'get_transitions': List all transitions in a state machine (params: state_machine)\n"
+			"- 'get_conduits': List all conduits (logic-only states) in a state machine (params: state_machine)"
 		);
 		Info.Parameters = {
 			FMCPToolParameter(TEXT("blueprint_path"), TEXT("string"), TEXT("Path to the Animation Blueprint (e.g., '/Game/Characters/ABP_Character')"), true),
@@ -118,14 +138,14 @@ public:
 			FMCPToolParameter(TEXT("search_pattern"), TEXT("string"), TEXT("Animation search pattern (for find_animations)"), false),
 			FMCPToolParameter(TEXT("asset_type"), TEXT("string"), TEXT("Asset type filter: AnimSequence, BlendSpace, BlendSpace1D, Montage, All"), false, TEXT("All")),
 			FMCPToolParameter(TEXT("operations"), TEXT("array"), TEXT("Array of operations for batch mode"), false),
-			// New parameters for enhanced operations
 			FMCPToolParameter(TEXT("variable_name"), TEXT("string"), TEXT("Blueprint variable name (for add_comparison_chain)"), false),
 			FMCPToolParameter(TEXT("comparison_type"), TEXT("string"), TEXT("Comparison type: Greater, Less, GreaterEqual, LessEqual, Equal, NotEqual (for add_comparison_chain)"), false),
 			FMCPToolParameter(TEXT("compare_value"), TEXT("string"), TEXT("Value to compare against (for add_comparison_chain)"), false),
 			FMCPToolParameter(TEXT("pin_value"), TEXT("string"), TEXT("Default value for the pin (for set_pin_default_value)"), false),
 			FMCPToolParameter(TEXT("pin_name"), TEXT("string"), TEXT("Pin name to set value (for set_pin_default_value)"), false),
-			// Bulk operation parameters
-			FMCPToolParameter(TEXT("rules"), TEXT("array"), TEXT("Array of condition rules for setup_transition_conditions. Each rule: {match: {from, to}, conditions: [...], logic: 'AND'|'OR'}"), false)
+			FMCPToolParameter(TEXT("rules"), TEXT("array"), TEXT("Array of condition rules for setup_transition_conditions. Each rule: {match: {from, to}, conditions: [...], logic: 'AND'|'OR'}"), false),
+			FMCPToolParameter(TEXT("variable_type"), TEXT("string"), TEXT("Variable pin type for add_variable (e.g., 'float', 'int', 'bool', 'string', 'name', 'vector', 'rotator')"), false),
+			FMCPToolParameter(TEXT("default_value"), TEXT("string"), TEXT("Default value for add_variable / set_variable_default (string-encoded)"), false)
 		};
 		Info.Annotations = FMCPToolAnnotations::Modifying();
 		return Info;
@@ -134,7 +154,6 @@ public:
 	virtual FMCPToolResult Execute(const TSharedRef<FJsonObject>& Params) override;
 
 private:
-	// Operation handlers
 	FMCPToolResult HandleGetInfo(const FString& BlueprintPath);
 	FMCPToolResult HandleGetStateMachine(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult HandleCreateStateMachine(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
@@ -154,7 +173,6 @@ private:
 	FMCPToolResult HandleFindAnimations(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult HandleBatch(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 
-	// NEW handlers for enhanced operations
 	FMCPToolResult HandleGetTransitionNodes(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult HandleInspectNodePins(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 	FMCPToolResult HandleSetPinDefaultValue(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
@@ -162,10 +180,16 @@ private:
 	FMCPToolResult HandleValidateBlueprint(const FString& BlueprintPath);
 	FMCPToolResult HandleGetStateMachineDiagram(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 
-	// Bulk operation handler
 	FMCPToolResult HandleSetupTransitionConditions(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
 
-	// Helper to extract position
+	FMCPToolResult HandleAddVariable(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult HandleSetVariableDefault(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult HandleRemoveVariable(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult HandleCompile(const FString& BlueprintPath);
+	FMCPToolResult HandleGetStates(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult HandleGetTransitions(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
+	FMCPToolResult HandleGetConduits(const FString& BlueprintPath, const TSharedRef<FJsonObject>& Params);
+
 	FVector2D ExtractPosition(const TSharedRef<FJsonObject>& Params);
 
 	/**

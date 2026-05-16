@@ -2,6 +2,7 @@
 
 #include "UnrealClaudeMCPServer.h"
 #include "MCPToolRegistry.h"
+#include "MCPResponseFormatter.h"
 #include "UnrealClaudeModule.h"
 #include "UnrealClaudeConstants.h"
 #include "HttpServerModule.h"
@@ -34,10 +35,8 @@ bool FUnrealClaudeMCPServer::Start(uint32 Port)
 
 	ServerPort = Port;
 
-	// Get or start the HTTP server module
 	FHttpServerModule& HttpServerModule = FHttpServerModule::Get();
 
-	// Start listening on the specified port
 	HttpRouter = HttpServerModule.GetHttpRouter(ServerPort);
 	if (!HttpRouter.IsValid())
 	{
@@ -45,15 +44,12 @@ bool FUnrealClaudeMCPServer::Start(uint32 Port)
 		return false;
 	}
 
-	// Setup routes
 	SetupRoutes();
 
-	// Start the listeners
 	HttpServerModule.StartAllListeners();
 
 	bIsRunning = true;
 
-	// Start the async task queue
 	if (ToolRegistry.IsValid())
 	{
 		ToolRegistry->StartTaskQueue();
@@ -80,7 +76,6 @@ void FUnrealClaudeMCPServer::Stop()
 		ToolRegistry->StopTaskQueue();
 	}
 
-	// Unbind routes
 	if (HttpRouter.IsValid())
 	{
 		if (ListToolsHandle.IsValid())
@@ -108,21 +103,18 @@ void FUnrealClaudeMCPServer::SetupRoutes()
 		return;
 	}
 
-	// GET /mcp/tools - List all available tools
 	ListToolsHandle = HttpRouter->BindRoute(
 		FHttpPath(TEXT("/mcp/tools")),
 		EHttpServerRequestVerbs::VERB_GET,
 		FHttpRequestHandler::CreateRaw(this, &FUnrealClaudeMCPServer::HandleListTools)
 	);
 
-	// POST /mcp/tool/* - Execute a tool (wildcard path)
 	ExecuteToolHandle = HttpRouter->BindRoute(
 		FHttpPath(TEXT("/mcp/tool")),
 		EHttpServerRequestVerbs::VERB_POST,
 		FHttpRequestHandler::CreateRaw(this, &FUnrealClaudeMCPServer::HandleExecuteTool)
 	);
 
-	// GET /mcp/status - Server status
 	StatusHandle = HttpRouter->BindRoute(
 		FHttpPath(TEXT("/mcp/status")),
 		EHttpServerRequestVerbs::VERB_GET,
@@ -145,7 +137,6 @@ bool FUnrealClaudeMCPServer::HandleListTools(const FHttpServerRequest& Request, 
 			ToolJson->SetStringField(TEXT("name"), Tool.Name);
 			ToolJson->SetStringField(TEXT("description"), Tool.Description);
 
-			// Add parameters schema
 			TArray<TSharedPtr<FJsonValue>> ParamsArray;
 			for (const FMCPToolParameter& Param : Tool.Parameters)
 			{
@@ -162,7 +153,6 @@ bool FUnrealClaudeMCPServer::HandleListTools(const FHttpServerRequest& Request, 
 			}
 			ToolJson->SetArrayField(TEXT("parameters"), ParamsArray);
 
-			// Add tool annotations (behavioral hints for LLM clients)
 			TSharedPtr<FJsonObject> AnnotationsJson = MakeShared<FJsonObject>();
 			AnnotationsJson->SetBoolField(TEXT("readOnlyHint"), Tool.Annotations.bReadOnlyHint);
 			AnnotationsJson->SetBoolField(TEXT("destructiveHint"), Tool.Annotations.bDestructiveHint);
@@ -186,10 +176,8 @@ bool FUnrealClaudeMCPServer::HandleListTools(const FHttpServerRequest& Request, 
 
 bool FUnrealClaudeMCPServer::HandleExecuteTool(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	// Extract tool name from path: /mcp/tool/{name}
 	FString RelativePath = Request.RelativePath.GetPath();
 
-	// Parse tool name from path
 	FString ToolName;
 	if (RelativePath.StartsWith(TEXT("/mcp/tool/")))
 	{
@@ -210,7 +198,6 @@ bool FUnrealClaudeMCPServer::HandleExecuteTool(const FHttpServerRequest& Request
 		return true;
 	}
 
-	// Parse JSON body for parameters
 	TSharedPtr<FJsonObject> ParamsJson;
 	if (Request.Body.Num() > UnrealClaudeConstants::MCPServer::MaxRequestBodySize)
 	{
@@ -238,7 +225,6 @@ bool FUnrealClaudeMCPServer::HandleExecuteTool(const FHttpServerRequest& Request
 		ParamsJson = MakeShared<FJsonObject>();
 	}
 
-	// Execute tool
 	if (!ToolRegistry.IsValid())
 	{
 		OnComplete(CreateErrorResponse(TEXT("Tool registry not initialized"), EHttpServerResponseCodes::ServerError));
@@ -247,25 +233,7 @@ bool FUnrealClaudeMCPServer::HandleExecuteTool(const FHttpServerRequest& Request
 
 	FMCPToolResult Result = ToolRegistry->ExecuteTool(ToolName, ParamsJson.ToSharedRef());
 
-	// Build response
-	TSharedPtr<FJsonObject> ResponseJson = MakeShared<FJsonObject>();
-	ResponseJson->SetBoolField(TEXT("success"), Result.bSuccess);
-	ResponseJson->SetStringField(TEXT("message"), Result.Message);
-
-	if (Result.Data.IsValid())
-	{
-		ResponseJson->SetObjectField(TEXT("data"), Result.Data);
-	}
-
-	if (Result.Warnings.Num() > 0)
-	{
-		TArray<TSharedPtr<FJsonValue>> WarningsJson;
-		for (const FString& Warning : Result.Warnings)
-		{
-			WarningsJson.Add(MakeShared<FJsonValueString>(Warning));
-		}
-		ResponseJson->SetArrayField(TEXT("warnings"), WarningsJson);
-	}
+	TSharedPtr<FJsonObject> ResponseJson = UnrealClaude::MCP::BuildToolResultJson(Result);
 
 	FString JsonString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
@@ -285,7 +253,6 @@ bool FUnrealClaudeMCPServer::HandleStatus(const FHttpServerRequest& Request, con
 	ResponseJson->SetStringField(TEXT("version"), TEXT("1.0.0"));
 	ResponseJson->SetNumberField(TEXT("toolCount"), ToolRegistry.IsValid() ? ToolRegistry->GetAllTools().Num() : 0);
 
-	// Add list of available tools
 	if (ToolRegistry.IsValid())
 	{
 		TArray<TSharedPtr<FJsonValue>> ToolsArray;
@@ -299,7 +266,6 @@ bool FUnrealClaudeMCPServer::HandleStatus(const FHttpServerRequest& Request, con
 		ResponseJson->SetArrayField(TEXT("tools"), ToolsArray);
 	}
 
-	// Add project info
 	ResponseJson->SetStringField(TEXT("projectName"), FApp::GetProjectName());
 	ResponseJson->SetStringField(TEXT("engineVersion"), FEngineVersion::Current().ToString());
 
@@ -326,9 +292,7 @@ TUniquePtr<FHttpServerResponse> FUnrealClaudeMCPServer::CreateJsonResponse(const
 
 TUniquePtr<FHttpServerResponse> FUnrealClaudeMCPServer::CreateErrorResponse(const FString& Message, EHttpServerResponseCodes Code)
 {
-	TSharedPtr<FJsonObject> ErrorJson = MakeShared<FJsonObject>();
-	ErrorJson->SetBoolField(TEXT("success"), false);
-	ErrorJson->SetStringField(TEXT("error"), Message);
+	TSharedPtr<FJsonObject> ErrorJson = UnrealClaude::MCP::BuildErrorEnvelopeJson(Message);
 
 	FString JsonString;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);

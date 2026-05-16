@@ -11,6 +11,7 @@
 #include "MCP/Tools/MCPTool_AssetSearch.h"
 #include "MCP/Tools/MCPTool_AssetDependencies.h"
 #include "MCP/Tools/MCPTool_AssetReferencers.h"
+#include "MCP/Tools/MCPTool_Asset.h"
 #include "Dom/JsonObject.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 
@@ -431,7 +432,6 @@ bool FMCPTool_AssetSearch_ResponseFormat::RunTest(const FString& Parameters)
 
 			if (Asset.IsValid())
 			{
-				// Verify asset JSON structure
 				TestTrue("Asset should have 'path'", Asset->HasField(TEXT("path")));
 				TestTrue("Asset should have 'name'", Asset->HasField(TEXT("name")));
 				TestTrue("Asset should have 'class'", Asset->HasField(TEXT("class")));
@@ -676,6 +676,87 @@ bool FMCPTool_AssetSearch_CanonicalBeatsAlias::RunTest(const FString& Parameters
 	TestTrue("Should warn about deprecated asset_type even when canonical is set",
 		Result.Warnings.Num() >= 1);
 
+	return true;
+}
+
+// ===== Asset.move destination_path Alias Tests =====
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_Asset_MoveDestinationPathAlias,
+	"UnrealClaude.MCP.Tools.Asset.MoveDestinationPathAliasWarns",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_Asset_MoveDestinationPathAlias::RunTest(const FString& Parameters)
+{
+	FMCPTool_Asset Tool;
+
+	// Pass destination_path (alias) instead of destination_directory. Source asset
+	// doesn't exist, so the op fails — but the alias warning should still attach.
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("operation"), TEXT("move"));
+	Params->SetStringField(TEXT("asset_path"), TEXT("/Game/NonExistent/Foo"));
+	Params->SetStringField(TEXT("destination_path"), TEXT("/Game/NewLocation/"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail (source asset does not exist)", Result.bSuccess);
+	TestTrue("Should emit alias warning even on early failure", Result.Warnings.Num() >= 1);
+
+	bool bMentionsBoth = false;
+	for (const FString& W : Result.Warnings)
+	{
+		if (W.Contains(TEXT("destination_path")) && W.Contains(TEXT("destination_directory")))
+		{
+			bMentionsBoth = true;
+			break;
+		}
+	}
+	TestTrue("Warning should mention destination_path → destination_directory", bMentionsBoth);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_Asset_MoveCanonicalNoWarn,
+	"UnrealClaude.MCP.Tools.Asset.MoveCanonicalNoWarn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_Asset_MoveCanonicalNoWarn::RunTest(const FString& Parameters)
+{
+	FMCPTool_Asset Tool;
+
+	// Canonical destination_directory should produce zero warnings.
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("operation"), TEXT("move"));
+	Params->SetStringField(TEXT("asset_path"), TEXT("/Game/NonExistent/Foo"));
+	Params->SetStringField(TEXT("destination_directory"), TEXT("/Game/NewLocation/"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail (source asset does not exist)", Result.bSuccess);
+	TestEqual("Canonical destination_directory should not emit alias warnings", Result.Warnings.Num(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPTool_Asset_MoveMissingDestErrorMentionsCanonical,
+	"UnrealClaude.MCP.Tools.Asset.MoveMissingDestNamesCanonical",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FMCPTool_Asset_MoveMissingDestErrorMentionsCanonical::RunTest(const FString& Parameters)
+{
+	FMCPTool_Asset Tool;
+
+	// Neither canonical nor alias provided — error should reference the canonical name
+	// so the LLM knows what to add.
+	TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("operation"), TEXT("move"));
+	Params->SetStringField(TEXT("asset_path"), TEXT("/Game/NonExistent/Foo"));
+
+	FMCPToolResult Result = Tool.Execute(Params);
+	TestFalse("Should fail with missing required parameter", Result.bSuccess);
+	TestTrue("Error should name destination_directory (canonical, not the alias)",
+		Result.Message.Contains(TEXT("destination_directory")));
 	return true;
 }
 

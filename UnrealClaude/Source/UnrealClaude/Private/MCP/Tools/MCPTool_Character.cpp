@@ -6,8 +6,14 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimBlueprint.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Engine/Blueprint.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 
 FMCPToolResult FMCPTool_Character::Execute(const TSharedRef<FJsonObject>& Params)
 {
@@ -38,9 +44,17 @@ FMCPToolResult FMCPTool_Character::Execute(const TSharedRef<FJsonObject>& Params
 	{
 		return ExecuteGetComponents(Params);
 	}
+	else if (Operation == TEXT("get_character_config"))
+	{
+		return ExecuteGetCharacterConfig(Params);
+	}
+	else if (Operation == TEXT("assign_anim_bp"))
+	{
+		return ExecuteAssignAnimBP(Params);
+	}
 
 	return FMCPToolResult::Error(FString::Printf(
-		TEXT("Unknown operation: '%s'. Valid: list_characters, get_character_info, get_movement_params, set_movement_params, get_components"),
+		TEXT("Unknown operation: '%s'. Valid: list_characters, get_character_info, get_movement_params, set_movement_params, get_components, get_character_config, assign_anim_bp"),
 		*Operation));
 }
 
@@ -69,7 +83,6 @@ FMCPToolResult FMCPTool_Character::ExecuteListCharacters(const TSharedRef<FJsonO
 			continue;
 		}
 
-		// Apply class filter if specified
 		if (!ClassFilter.IsEmpty())
 		{
 			FString ClassName = Character->GetClass()->GetName();
@@ -81,7 +94,6 @@ FMCPToolResult FMCPTool_Character::ExecuteListCharacters(const TSharedRef<FJsonO
 
 		TotalCount++;
 
-		// Apply pagination
 		if (SkippedCount < Offset)
 		{
 			SkippedCount++;
@@ -90,7 +102,7 @@ FMCPToolResult FMCPTool_Character::ExecuteListCharacters(const TSharedRef<FJsonO
 
 		if (CharacterArray.Num() >= Limit)
 		{
-			continue; // Still count but don't add
+			continue; // Keep iterating to compute TotalCount accurately for pagination metadata
 		}
 
 		CharacterArray.Add(MakeShared<FJsonValueObject>(CharacterToJson(Character)));
@@ -99,6 +111,9 @@ FMCPToolResult FMCPTool_Character::ExecuteListCharacters(const TSharedRef<FJsonO
 	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
 	ResultData->SetArrayField(TEXT("characters"), CharacterArray);
 	ResultData->SetNumberField(TEXT("count"), CharacterArray.Num());
+	// 'total_found' is the canonical pagination field across the plugin (matches
+	// list_actions/list_contexts/asset_search). 'total' kept as deprecated alias for back-compat.
+	ResultData->SetNumberField(TEXT("total_found"), TotalCount);
 	ResultData->SetNumberField(TEXT("total"), TotalCount);
 	ResultData->SetNumberField(TEXT("offset"), Offset);
 	ResultData->SetNumberField(TEXT("limit"), Limit);
@@ -133,7 +148,6 @@ FMCPToolResult FMCPTool_Character::ExecuteGetCharacterInfo(const TSharedRef<FJso
 
 	TSharedPtr<FJsonObject> CharacterData = CharacterToJson(Character, true);
 
-	// Add detailed mesh info
 	if (USkeletalMeshComponent* MeshComp = Character->GetMesh())
 	{
 		TSharedPtr<FJsonObject> MeshInfo = MakeShared<FJsonObject>();
@@ -146,7 +160,6 @@ FMCPToolResult FMCPTool_Character::ExecuteGetCharacterInfo(const TSharedRef<FJso
 		CharacterData->SetObjectField(TEXT("skeletal_mesh"), MeshInfo);
 	}
 
-	// Add capsule info
 	if (UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
 	{
 		TSharedPtr<FJsonObject> CapsuleInfo = MakeShared<FJsonObject>();
@@ -155,7 +168,6 @@ FMCPToolResult FMCPTool_Character::ExecuteGetCharacterInfo(const TSharedRef<FJso
 		CharacterData->SetObjectField(TEXT("capsule"), CapsuleInfo);
 	}
 
-	// Add animation info
 	if (USkeletalMeshComponent* MeshComp = Character->GetMesh())
 	{
 		if (UAnimInstance* AnimInstance = MeshComp->GetAnimInstance())
@@ -240,10 +252,8 @@ FMCPToolResult FMCPTool_Character::ExecuteSetMovementParams(const TSharedRef<FJs
 		return FMCPToolResult::Error(TEXT("Character has no CharacterMovementComponent"));
 	}
 
-	// Track what was modified
 	TArray<FString> ModifiedParams;
 
-	// Apply movement parameter modifications
 	double Value;
 
 	if (Params->TryGetNumberField(TEXT("max_walk_speed"), Value))
@@ -358,7 +368,6 @@ FMCPToolResult FMCPTool_Character::ExecuteGetComponents(const TSharedRef<FJsonOb
 			continue;
 		}
 
-		// Apply class filter if specified
 		if (!ComponentClassFilter.IsEmpty())
 		{
 			FString ClassName = Component->GetClass()->GetName();
@@ -414,21 +423,17 @@ TSharedPtr<FJsonObject> FMCPTool_Character::CharacterToJson(ACharacter* Characte
 		return Json;
 	}
 
-	// Basic actor info
 	Json->SetStringField(TEXT("name"), Character->GetName());
 	Json->SetStringField(TEXT("label"), Character->GetActorLabel());
 	Json->SetStringField(TEXT("class"), Character->GetClass()->GetName());
 	Json->SetStringField(TEXT("class_path"), Character->GetClass()->GetPathName());
 
-	// Transform
 	Json->SetObjectField(TEXT("location"), UnrealClaudeJsonUtils::VectorToJson(Character->GetActorLocation()));
 	Json->SetObjectField(TEXT("rotation"), UnrealClaudeJsonUtils::RotatorToJson(Character->GetActorRotation()));
 
-	// Character state
 	Json->SetBoolField(TEXT("can_jump"), Character->CanJump());
 	Json->SetBoolField(TEXT("is_crouched"), Character->bIsCrouched);
 
-	// Optional movement details
 	if (bIncludeMovement && Character->GetCharacterMovement())
 	{
 		Json->SetObjectField(TEXT("movement"), MovementComponentToJson(Character->GetCharacterMovement()));
@@ -446,34 +451,28 @@ TSharedPtr<FJsonObject> FMCPTool_Character::MovementComponentToJson(UCharacterMo
 		return Json;
 	}
 
-	// Walking/Running
 	Json->SetNumberField(TEXT("max_walk_speed"), Movement->MaxWalkSpeed);
 	Json->SetNumberField(TEXT("max_walk_speed_crouched"), Movement->MaxWalkSpeedCrouched);
 	Json->SetNumberField(TEXT("max_acceleration"), Movement->MaxAcceleration);
 	Json->SetNumberField(TEXT("ground_friction"), Movement->GroundFriction);
 
-	// Jumping/Air
 	Json->SetNumberField(TEXT("jump_z_velocity"), Movement->JumpZVelocity);
 	Json->SetNumberField(TEXT("air_control"), Movement->AirControl);
 	Json->SetNumberField(TEXT("air_control_boost_multiplier"), Movement->AirControlBoostMultiplier);
 	Json->SetNumberField(TEXT("gravity_scale"), Movement->GravityScale);
 
-	// Step/Slope
 	Json->SetNumberField(TEXT("max_step_height"), Movement->MaxStepHeight);
 	Json->SetNumberField(TEXT("walkable_floor_angle"), Movement->GetWalkableFloorAngle());
 	Json->SetNumberField(TEXT("walkable_floor_z"), Movement->GetWalkableFloorZ());
 
-	// Braking
 	Json->SetNumberField(TEXT("braking_deceleration_walking"), Movement->BrakingDecelerationWalking);
 	Json->SetNumberField(TEXT("braking_deceleration_falling"), Movement->BrakingDecelerationFalling);
 	Json->SetNumberField(TEXT("braking_friction"), Movement->BrakingFriction);
 	Json->SetBoolField(TEXT("use_separate_braking_friction"), Movement->bUseSeparateBrakingFriction);
 
-	// Swimming/Flying
 	Json->SetNumberField(TEXT("max_swim_speed"), Movement->MaxSwimSpeed);
 	Json->SetNumberField(TEXT("max_fly_speed"), Movement->MaxFlySpeed);
 
-	// Current state
 	FString MovementModeStr;
 	switch (Movement->MovementMode)
 	{
@@ -505,7 +504,6 @@ TSharedPtr<FJsonObject> FMCPTool_Character::ComponentToJson(UActorComponent* Com
 	Json->SetStringField(TEXT("class"), Component->GetClass()->GetName());
 	Json->SetBoolField(TEXT("active"), Component->IsActive());
 
-	// Add scene component details if applicable
 	if (USceneComponent* SceneComp = Cast<USceneComponent>(Component))
 	{
 		Json->SetBoolField(TEXT("visible"), SceneComp->IsVisible());
@@ -519,4 +517,157 @@ TSharedPtr<FJsonObject> FMCPTool_Character::ComponentToJson(UActorComponent* Com
 	}
 
 	return Json;
+}
+
+namespace
+{
+	// Resolve a Character Blueprint asset path to (UBlueprint*, ACharacter* CDO).
+	// Returns an error result on failure.
+	TOptional<FMCPToolResult> LoadCharacterBlueprint(
+		const FString& BlueprintPath,
+		UBlueprint*& OutBlueprint,
+		ACharacter*& OutCDO)
+	{
+		OutBlueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+		if (!OutBlueprint)
+		{
+			return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load Blueprint: %s"), *BlueprintPath));
+		}
+		if (!OutBlueprint->GeneratedClass)
+		{
+			return FMCPToolResult::Error(FString::Printf(TEXT("Blueprint has no GeneratedClass (recompile may be needed): %s"), *BlueprintPath));
+		}
+		if (!OutBlueprint->GeneratedClass->IsChildOf(ACharacter::StaticClass()))
+		{
+			return FMCPToolResult::Error(FString::Printf(
+				TEXT("Blueprint is not an ACharacter subclass: %s (parent: %s)"),
+				*BlueprintPath, *OutBlueprint->GeneratedClass->GetName()));
+		}
+		OutCDO = Cast<ACharacter>(OutBlueprint->GeneratedClass->GetDefaultObject());
+		if (!OutCDO)
+		{
+			return FMCPToolResult::Error(FString::Printf(TEXT("Could not get Character CDO for: %s"), *BlueprintPath));
+		}
+		return TOptional<FMCPToolResult>();
+	}
+}
+
+FMCPToolResult FMCPTool_Character::ExecuteGetCharacterConfig(const TSharedRef<FJsonObject>& Params)
+{
+	FString BlueprintPath;
+	TOptional<FMCPToolResult> Error;
+	if (!ExtractRequiredString(Params, TEXT("blueprint_path"), BlueprintPath, Error))
+	{
+		return Error.GetValue();
+	}
+	if (!ValidateBlueprintPathParam(BlueprintPath, Error))
+	{
+		return Error.GetValue();
+	}
+
+	UBlueprint* BP = nullptr;
+	ACharacter* CDO = nullptr;
+	if (auto LoadError = LoadCharacterBlueprint(BlueprintPath, BP, CDO))
+	{
+		return LoadError.GetValue();
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+	Result->SetStringField(TEXT("class_name"), BP->GeneratedClass->GetName());
+	Result->SetStringField(TEXT("parent_class"), BP->GeneratedClass->GetSuperClass()
+		? BP->GeneratedClass->GetSuperClass()->GetName() : TEXT(""));
+
+	if (USkeletalMeshComponent* Mesh = CDO->GetMesh())
+	{
+		TSharedPtr<FJsonObject> MeshJson = MakeShared<FJsonObject>();
+		USkeletalMesh* SkelMesh = Mesh->GetSkeletalMeshAsset();
+		MeshJson->SetStringField(TEXT("skeletal_mesh_path"),
+			SkelMesh ? SkelMesh->GetPathName() : TEXT(""));
+		UClass* AnimClass = Mesh->GetAnimClass();
+		MeshJson->SetStringField(TEXT("anim_class_path"),
+			AnimClass ? AnimClass->GetPathName() : TEXT(""));
+		Result->SetObjectField(TEXT("mesh"), MeshJson);
+	}
+
+	if (UCapsuleComponent* Capsule = CDO->GetCapsuleComponent())
+	{
+		TSharedPtr<FJsonObject> CapsuleJson = MakeShared<FJsonObject>();
+		CapsuleJson->SetNumberField(TEXT("radius"), Capsule->GetUnscaledCapsuleRadius());
+		CapsuleJson->SetNumberField(TEXT("half_height"), Capsule->GetUnscaledCapsuleHalfHeight());
+		Result->SetObjectField(TEXT("capsule"), CapsuleJson);
+	}
+
+	if (UCharacterMovementComponent* Movement = CDO->GetCharacterMovement())
+	{
+		Result->SetObjectField(TEXT("movement_defaults"), MovementComponentToJson(Movement));
+	}
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Character config for '%s'"), *BP->GeneratedClass->GetName()),
+		Result);
+}
+
+FMCPToolResult FMCPTool_Character::ExecuteAssignAnimBP(const TSharedRef<FJsonObject>& Params)
+{
+	FString BlueprintPath, AnimBlueprintPath;
+	TOptional<FMCPToolResult> Error;
+	if (!ExtractRequiredString(Params, TEXT("blueprint_path"), BlueprintPath, Error))
+	{
+		return Error.GetValue();
+	}
+	if (!ValidateBlueprintPathParam(BlueprintPath, Error))
+	{
+		return Error.GetValue();
+	}
+	if (!ExtractRequiredString(Params, TEXT("anim_blueprint_path"), AnimBlueprintPath, Error))
+	{
+		return Error.GetValue();
+	}
+	if (!ValidateBlueprintPathParam(AnimBlueprintPath, Error))
+	{
+		return Error.GetValue();
+	}
+
+	UBlueprint* BP = nullptr;
+	ACharacter* CDO = nullptr;
+	if (auto LoadError = LoadCharacterBlueprint(BlueprintPath, BP, CDO))
+	{
+		return LoadError.GetValue();
+	}
+
+	UAnimBlueprint* AnimBP = LoadObject<UAnimBlueprint>(nullptr, *AnimBlueprintPath);
+	if (!AnimBP)
+	{
+		return FMCPToolResult::Error(FString::Printf(TEXT("Failed to load AnimBlueprint: %s"), *AnimBlueprintPath));
+	}
+	if (!AnimBP->GeneratedClass || !AnimBP->GeneratedClass->IsChildOf(UAnimInstance::StaticClass()))
+	{
+		return FMCPToolResult::Error(FString::Printf(TEXT("Asset is not a valid AnimBlueprint: %s"), *AnimBlueprintPath));
+	}
+
+	USkeletalMeshComponent* Mesh = CDO->GetMesh();
+	if (!Mesh)
+	{
+		return FMCPToolResult::Error(TEXT("Character CDO has no Mesh component"));
+	}
+
+	UClass* NewAnimClass = AnimBP->GeneratedClass;
+	Mesh->SetAnimInstanceClass(NewAnimClass);
+	Mesh->AnimClass = NewAnimClass;
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+	FKismetEditorUtilities::CompileBlueprint(BP);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("blueprint_path"), BlueprintPath);
+	Result->SetStringField(TEXT("anim_blueprint_path"), AnimBlueprintPath);
+	Result->SetStringField(TEXT("anim_class"), NewAnimClass->GetPathName());
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Assigned AnimBlueprint '%s' to Character '%s'"),
+			*AnimBP->GetName(), *BP->GeneratedClass->GetName()),
+		Result);
 }
