@@ -18,6 +18,7 @@
 #include "Tools/MCPTool_CleanupScripts.h"
 #include "Tools/MCPTool_GetScriptHistory.h"
 #include "Tools/MCPTool_CaptureViewport.h"
+#include "Tools/MCPTool_PIEScreenshot.h"
 #include "Tools/MCPTool_BlueprintQuery.h"
 #include "Tools/MCPTool_BlueprintModify.h"
 #include "Tools/MCPTool_AnimBlueprintModify.h"
@@ -113,6 +114,11 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 
 	// Viewport capture
 	RegisterTool(MakeShared<FMCPTool_CaptureViewport>());
+
+	// PIE screenshot with UMG composition (Sprint 6 6-2 W2-EXIT closure)
+	// FScreenshotRequest::RequestScreenshot(bShowUI=true) — the only path that
+	// includes Slate widgets in PIE PNGs (F9 keypress equivalent).
+	RegisterTool(MakeShared<FMCPTool_PIEScreenshot>());
 
 	// Blueprint tools
 	RegisterTool(MakeShared<FMCPTool_BlueprintQuery>());
