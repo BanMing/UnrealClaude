@@ -6,12 +6,16 @@
 #include "UnrealClaudeModule.h"
 #include "Editor.h"
 #include "Engine/World.h"
+#include "Engine/LocalPlayer.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerInput.h"
 #include "GameFramework/Pawn.h"
 #include "InputCoreTypes.h"
 #include "InputKeyEventArgs.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
 
 UWorld* FMCPTool_PIEInput::GetPIEWorld()
 {
@@ -53,14 +57,15 @@ FMCPToolResult FMCPTool_PIEInput::Execute(const TSharedRef<FJsonObject>& Params)
 		return ParamError.GetValue();
 	}
 
-	if (Action == TEXT("key"))     return ExecuteKey(Params);
-	if (Action == TEXT("action"))  return ExecuteAction(Params);
-	if (Action == TEXT("axis"))    return ExecuteAxis(Params);
-	if (Action == TEXT("move_to")) return ExecuteMoveTo(Params);
-	if (Action == TEXT("look_at")) return ExecuteLookAt(Params);
+	if (Action == TEXT("key"))           return ExecuteKey(Params);
+	if (Action == TEXT("action"))        return ExecuteAction(Params);
+	if (Action == TEXT("inject_action")) return ExecuteInjectAction(Params);
+	if (Action == TEXT("axis"))          return ExecuteAxis(Params);
+	if (Action == TEXT("move_to"))       return ExecuteMoveTo(Params);
+	if (Action == TEXT("look_at"))       return ExecuteLookAt(Params);
 
 	return FMCPToolResult::Error(FString::Printf(
-		TEXT("Unknown action '%s'. Valid: key, action, axis, move_to, look_at"), *Action));
+		TEXT("Unknown action '%s'. Valid: key, action, inject_action, axis, move_to, look_at"), *Action));
 }
 
 FMCPToolResult FMCPTool_PIEInput::ExecuteKey(const TSharedRef<FJsonObject>& Params)
@@ -153,6 +158,125 @@ FMCPToolResult FMCPTool_PIEInput::ExecuteAction(const TSharedRef<FJsonObject>& P
 	Data->SetNumberField(TEXT("value"), Value);
 	Data->SetStringField(TEXT("resolved_key"), Key.GetDisplayName().ToString());
 	return FMCPToolResult::Success(FString::Printf(TEXT("Triggered action '%s'"), *ActionName), Data);
+}
+
+FMCPToolResult FMCPTool_PIEInput::ExecuteInjectAction(const TSharedRef<FJsonObject>& Params)
+{
+	// Enhanced-Input action injection.
+	//
+	// Routes through UEnhancedInputLocalPlayerSubsystem::InjectInputForAction,
+	// which is the canonical Enhanced-Input entry point. This is distinct from
+	// the legacy 'action' variant above, which only resolves PlayerInput
+	// ActionMapping entries and does NOT drive Enhanced-Input bindings.
+	//
+	// Execution steps:
+	//   1. Extract params: player_index, action_path (required), value_type
+	//      (default "Digital"), value (default 1.0), axis_y / axis_z (default 0).
+	//   2. Resolve PC -> LocalPlayer -> EnhancedInputLocalPlayerSubsystem.
+	//   3. Load the UInputAction asset from action_path.
+	//   4. Construct FInputActionValue based on value_type.
+	//   5. Call EIS->InjectInputForAction with empty Modifiers / Triggers arrays.
+	//   6. Log and return success.
+
+	const int32 PlayerIndex = ExtractOptionalNumber<int32>(Params, TEXT("player_index"), 0);
+	const double Value = ExtractOptionalNumber<double>(Params, TEXT("value"), 1.0);
+	const double AxisY = ExtractOptionalNumber<double>(Params, TEXT("axis_y"), 0.0);
+	const double AxisZ = ExtractOptionalNumber<double>(Params, TEXT("axis_z"), 0.0);
+
+	FString ActionPath;
+	TOptional<FMCPToolResult> ParamError;
+	if (!ExtractRequiredString(Params, TEXT("action_path"), ActionPath, ParamError))
+	{
+		return ParamError.GetValue();
+	}
+
+	// value_type is optional; default Digital.
+	FString ValueType = TEXT("Digital");
+	if (Params->HasTypedField<EJson::String>(TEXT("value_type")))
+	{
+		ValueType = Params->GetStringField(TEXT("value_type"));
+	}
+
+	// Step 2 — Resolve PC -> LocalPlayer -> EnhancedInputLocalPlayerSubsystem.
+	APlayerController* PC = GetPlayerController(PlayerIndex);
+	if (!PC)
+	{
+		return FMCPToolResult::Error(FString::Printf(TEXT("No player controller at index %d"), PlayerIndex));
+	}
+	ULocalPlayer* LP = PC->GetLocalPlayer();
+	if (!LP)
+	{
+		return FMCPToolResult::Error(TEXT("PlayerController has no LocalPlayer (Enhanced Input requires a local player)"));
+	}
+	UEnhancedInputLocalPlayerSubsystem* EIS = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
+	if (!EIS)
+	{
+		return FMCPToolResult::Error(TEXT("UEnhancedInputLocalPlayerSubsystem unavailable on the LocalPlayer"));
+	}
+
+	// Step 3 — Load the UInputAction asset.
+	UInputAction* IA = LoadObject<UInputAction>(nullptr, *ActionPath);
+	if (!IA)
+	{
+		return FMCPToolResult::Error(FString::Printf(
+			TEXT("Failed to load UInputAction at '%s' (check asset path)"), *ActionPath));
+	}
+
+	// Step 4 — Construct FInputActionValue.
+	// FInputActionValue stores the value in a typed union; the constructor chosen
+	// here determines the runtime type tag. InjectInputForAction validates the
+	// shape matches the UInputAction's ValueType, so this MUST agree with the
+	// asset's declared shape.
+	FInputActionValue ActionValue;
+	if (ValueType.Equals(TEXT("Digital"), ESearchCase::IgnoreCase))
+	{
+		ActionValue = FInputActionValue(Value != 0.0);
+	}
+	else if (ValueType.Equals(TEXT("Axis1D"), ESearchCase::IgnoreCase))
+	{
+		ActionValue = FInputActionValue(static_cast<float>(Value));
+	}
+	else if (ValueType.Equals(TEXT("Axis2D"), ESearchCase::IgnoreCase))
+	{
+		ActionValue = FInputActionValue(FVector2D(Value, AxisY));
+	}
+	else if (ValueType.Equals(TEXT("Axis3D"), ESearchCase::IgnoreCase))
+	{
+		ActionValue = FInputActionValue(FVector(Value, AxisY, AxisZ));
+	}
+	else
+	{
+		return FMCPToolResult::Error(FString::Printf(
+			TEXT("Unknown value_type '%s'. Valid: Digital, Axis1D, Axis2D, Axis3D"), *ValueType));
+	}
+
+	// Step 5 — Inject. Empty Modifiers / Triggers arrays: bypass the asset's
+	// trigger/modifier pipeline and deliver the value directly to the binding,
+	// which is what callers expect for scripted PIE injection.
+	EIS->InjectInputForAction(IA, ActionValue, /*Modifiers=*/{}, /*Triggers=*/{});
+
+	UE_LOG(LogUnrealClaude, Log,
+		TEXT("PIE input: inject_action path='%s' type=%s value=%.3f (axis_y=%.3f axis_z=%.3f) player=%d"),
+		*ActionPath, *ValueType, Value, AxisY, AxisZ, PlayerIndex);
+
+	// Step 6 — Return success JSON.
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("applied"), TEXT("inject_action"));
+	Data->SetStringField(TEXT("action_path"), ActionPath);
+	Data->SetStringField(TEXT("value_type"), ValueType);
+	Data->SetNumberField(TEXT("value"), Value);
+	if (ValueType.Equals(TEXT("Axis2D"), ESearchCase::IgnoreCase) ||
+		ValueType.Equals(TEXT("Axis3D"), ESearchCase::IgnoreCase))
+	{
+		Data->SetNumberField(TEXT("axis_y"), AxisY);
+	}
+	if (ValueType.Equals(TEXT("Axis3D"), ESearchCase::IgnoreCase))
+	{
+		Data->SetNumberField(TEXT("axis_z"), AxisZ);
+	}
+	Data->SetNumberField(TEXT("player_index"), PlayerIndex);
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Injected Enhanced-Input action '%s'"), *ActionPath), Data);
 }
 
 FMCPToolResult FMCPTool_PIEInput::ExecuteAxis(const TSharedRef<FJsonObject>& Params)
