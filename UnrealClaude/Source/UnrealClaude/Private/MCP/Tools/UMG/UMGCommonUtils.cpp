@@ -180,16 +180,32 @@ namespace UMGCommonUtils
         OutObject->SetStringField(TEXT("type"), Widget->GetClass()->GetName());
 
         // Step 2. Widget-level UPROPERTYs via FJsonObjectConverter.
+        //
+        // SkipFlags = CPF_InstancedReference:
+        //   UPanelWidget::Slots is marked UPROPERTY(Instanced). FJsonObjectConverter
+        //   recurses into instanced sub-objects, and each UPanelSlot has a Parent
+        //   pointer back to the owning panel — producing an unbounded
+        //   UCanvasPanel -> Slots[] -> UCanvasPanelSlot::Parent -> UCanvasPanel
+        //   cycle that overflows the stack in JsonUtilities.
+        //
+        //   The child widget tree is exposed by ExportWidgetTreeToJson / the
+        //   get_widget_tree MCP tool, so skipping instanced refs here is the
+        //   right tool boundary (this tool returns a single widget's own
+        //   properties, not its subtree).
+        constexpr uint64 SkipInstancedCycles = CPF_InstancedReference;
+
         TSharedRef<FJsonObject> WidgetProps = MakeShared<FJsonObject>();
         FJsonObjectConverter::UStructToJsonObject(
             Widget->GetClass(),
             Widget,
             WidgetProps,
             /*CheckFlags*/ 0,
-            /*SkipFlags*/ 0);
+            /*SkipFlags*/ SkipInstancedCycles);
         OutObject->SetObjectField(TEXT("properties"), WidgetProps);
 
         // Step 3. Slot props (separate sub-object — slot data lives on the slot UObject).
+        //   Same cycle hazard via UPanelSlot::Parent -> UPanelWidget::Slots[] -> self.
+        //   Apply the same SkipFlags here.
         if (Widget->Slot)
         {
             TSharedRef<FJsonObject> SlotProps = MakeShared<FJsonObject>();
@@ -197,7 +213,8 @@ namespace UMGCommonUtils
                 Widget->Slot->GetClass(),
                 Widget->Slot,
                 SlotProps,
-                0, 0);
+                /*CheckFlags*/ 0,
+                /*SkipFlags*/ SkipInstancedCycles);
             OutObject->SetObjectField(TEXT("slot"), SlotProps);
             OutObject->SetStringField(TEXT("slot_class"), Widget->Slot->GetClass()->GetName());
         }
