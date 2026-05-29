@@ -16,6 +16,14 @@
 #include "EnhancedInputSubsystems.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Layout/Geometry.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/Widget.h"
+#include "GenericPlatform/GenericWindow.h"
+#include "Widgets/SWindow.h"
 
 UWorld* FMCPTool_PIEInput::GetPIEWorld()
 {
@@ -63,9 +71,11 @@ FMCPToolResult FMCPTool_PIEInput::Execute(const TSharedRef<FJsonObject>& Params)
 	if (Action == TEXT("axis"))          return ExecuteAxis(Params);
 	if (Action == TEXT("move_to"))       return ExecuteMoveTo(Params);
 	if (Action == TEXT("look_at"))       return ExecuteLookAt(Params);
+	if (Action == TEXT("mouse"))         return ExecuteMouse(Params);
+	if (Action == TEXT("click_widget"))  return ExecuteClickWidget(Params);
 
 	return FMCPToolResult::Error(FString::Printf(
-		TEXT("Unknown action '%s'. Valid: key, action, inject_action, axis, move_to, look_at"), *Action));
+		TEXT("Unknown action '%s'. Valid: key, action, inject_action, axis, move_to, look_at, mouse, click_widget"), *Action));
 }
 
 FMCPToolResult FMCPTool_PIEInput::ExecuteKey(const TSharedRef<FJsonObject>& Params)
@@ -396,4 +406,328 @@ FMCPToolResult FMCPTool_PIEInput::ExecuteLookAt(const TSharedRef<FJsonObject>& P
 	Data->SetNumberField(TEXT("yaw"), LookRot.Yaw);
 	Data->SetNumberField(TEXT("roll"), LookRot.Roll);
 	return FMCPToolResult::Success(TEXT("Control rotation set"), Data);
+}
+
+// ============================================================================
+// Slate-routed mouse injection
+// ============================================================================
+
+namespace
+{
+	/**
+	 * Resolve "Left" / "Right" / "Middle" (case-insensitive) → FKey.
+	 *
+	 * @param ButtonName       Free-form button label.
+	 * @param OutKey           Resolved FKey on success.
+	 * @return true on success.
+	 */
+	bool ResolveMouseButtonKey(const FString& ButtonName, FKey& OutKey)
+	{
+		if (ButtonName.Equals(TEXT("Left"), ESearchCase::IgnoreCase) ||
+			ButtonName.Equals(TEXT("LMB"), ESearchCase::IgnoreCase))
+		{
+			OutKey = EKeys::LeftMouseButton;
+			return true;
+		}
+		if (ButtonName.Equals(TEXT("Right"), ESearchCase::IgnoreCase) ||
+			ButtonName.Equals(TEXT("RMB"), ESearchCase::IgnoreCase))
+		{
+			OutKey = EKeys::RightMouseButton;
+			return true;
+		}
+		if (ButtonName.Equals(TEXT("Middle"), ESearchCase::IgnoreCase) ||
+			ButtonName.Equals(TEXT("MMB"), ESearchCase::IgnoreCase))
+		{
+			OutKey = EKeys::MiddleMouseButton;
+			return true;
+		}
+		return false;
+	}
+}
+
+bool FMCPTool_PIEInput::FireSlateMouseEvent(double AbsX, double AbsY, const FKey& Button,
+	const FString& EventType, FString& OutError)
+{
+	// Slate is the canonical UMG input router. PlayerInput-level key injection
+	// (the path used by ExecuteKey) does NOT reach UMG widgets, which is why
+	// clicking hand cards via 'key:LeftMouseButton' fails. This function uses
+	// the Slate APIs directly so UUserWidget::NativeOnMouseButtonDown fires.
+
+	if (!FSlateApplication::IsInitialized())
+	{
+		OutError = TEXT("FSlateApplication not initialized");
+		return false;
+	}
+	FSlateApplication& Slate = FSlateApplication::Get();
+
+	// Step 1 — position the platform cursor. SetCursorPos drives the OS-level
+	// cursor; downstream FPointerEvent payloads must agree on the same coords.
+	const FVector2D AbsPos(AbsX, AbsY);
+	Slate.SetCursorPos(AbsPos);
+
+	// Build PressedButtons set for the event. For 'down' / 'click' the
+	// button is held; for 'up' the button has just been released so it must
+	// NOT be in PressedButtons (Slate dispatches up-event by checking the
+	// effecting button + the absence of it in the pressed set).
+	const bool bIsDown = EventType.Equals(TEXT("down"), ESearchCase::IgnoreCase) ||
+		EventType.Equals(TEXT("click"), ESearchCase::IgnoreCase);
+	const bool bIsUp = EventType.Equals(TEXT("up"), ESearchCase::IgnoreCase) ||
+		EventType.Equals(TEXT("click"), ESearchCase::IgnoreCase);
+	const bool bIsMove = EventType.Equals(TEXT("move"), ESearchCase::IgnoreCase);
+
+	if (!bIsDown && !bIsUp && !bIsMove)
+	{
+		OutError = FString::Printf(TEXT("Unknown event '%s'. Valid: click, down, up, move"), *EventType);
+		return false;
+	}
+
+	TSet<FKey> PressedForDown;
+	if (Button.IsValid()) { PressedForDown.Add(Button); }
+	const TSet<FKey> PressedForUpOrMove; // empty
+
+	const FModifierKeysState Modifiers; // no modifiers
+	const uint32 PointerIndex = 0;
+
+	// Step 2 — synthesize a move first so hover state updates against the
+	// new cursor location. Skipping this can leave UMG with stale hover and
+	// the button-down lands on the *previous* hovered widget.
+	{
+		FPointerEvent MoveEvent(
+			PointerIndex,
+			AbsPos,
+			AbsPos,
+			PressedForUpOrMove,
+			FKey(),       // no effecting button on a hover-refresh
+			0.0f,         // wheel delta
+			Modifiers
+		);
+		Slate.ProcessMouseMoveEvent(MoveEvent, /*bIsSynthetic=*/false);
+	}
+
+	// Step 3 — dispatch down / up. Pass an empty platform-window pointer so
+	// Slate resolves the topmost relevant window itself; this matches the
+	// path FSlateApplication takes for OS-driven mouse events that arrive
+	// before window association is established.
+	const TSharedPtr<FGenericWindow> NullPlatformWindow;
+
+	if (bIsMove)
+	{
+		// Already moved above; nothing more to do.
+	}
+	else if (EventType.Equals(TEXT("down"), ESearchCase::IgnoreCase))
+	{
+		FPointerEvent DownEvent(PointerIndex, AbsPos, AbsPos, PressedForDown,
+			Button, 0.0f, Modifiers);
+		Slate.ProcessMouseButtonDownEvent(NullPlatformWindow, DownEvent);
+	}
+	else if (EventType.Equals(TEXT("up"), ESearchCase::IgnoreCase))
+	{
+		FPointerEvent UpEvent(PointerIndex, AbsPos, AbsPos, PressedForUpOrMove,
+			Button, 0.0f, Modifiers);
+		Slate.ProcessMouseButtonUpEvent(UpEvent);
+	}
+	else // click = down + up
+	{
+		FPointerEvent DownEvent(PointerIndex, AbsPos, AbsPos, PressedForDown,
+			Button, 0.0f, Modifiers);
+		Slate.ProcessMouseButtonDownEvent(NullPlatformWindow, DownEvent);
+
+		FPointerEvent UpEvent(PointerIndex, AbsPos, AbsPos, PressedForUpOrMove,
+			Button, 0.0f, Modifiers);
+		Slate.ProcessMouseButtonUpEvent(UpEvent);
+	}
+
+	return true;
+}
+
+bool FMCPTool_PIEInput::ResolveWidgetCenter(const FString& WidgetClassFilter,
+	const FString& InnerWidgetName, int32 InstanceIndex,
+	FVector2D& OutAbsCenter, FString& OutResolvedName, FString& OutError)
+{
+	UWorld* PIEWorld = GetPIEWorld();
+	if (!PIEWorld)
+	{
+		OutError = TEXT("No active PIE world");
+		return false;
+	}
+
+	// Enumerate all UUserWidget instances in the PIE world. We deliberately
+	// pass UUserWidget base class + TopLevelOnly=false so nested user widgets
+	// (e.g. WBP_HandCard inside a WBP_PaogeCombatHUD hand container) are
+	// reached.
+	TArray<UUserWidget*> AllUserWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(PIEWorld, AllUserWidgets,
+		UUserWidget::StaticClass(), /*TopLevelOnly=*/false);
+
+	// Filter by class name OR full path. Asset paths sent by callers (e.g.
+	// "/Game/UI/WBP_HandCard") resolve to a generated class "WBP_HandCard_C";
+	// strip trailing "_C" and any leading path on both sides for matching.
+	const FString FilterTrimmed = WidgetClassFilter
+		.Replace(TEXT("_C"), TEXT(""), ESearchCase::CaseSensitive);
+	FString FilterShort = FilterTrimmed;
+	int32 LastSlash;
+	if (FilterTrimmed.FindLastChar(TEXT('/'), LastSlash))
+	{
+		FilterShort = FilterTrimmed.RightChop(LastSlash + 1);
+		// Path of form "/Game/UI/WBP_HandCard.WBP_HandCard" — strip ".X" tail.
+		int32 Dot;
+		if (FilterShort.FindChar(TEXT('.'), Dot))
+		{
+			FilterShort = FilterShort.Left(Dot);
+		}
+	}
+
+	TArray<UUserWidget*> Matches;
+	for (UUserWidget* W : AllUserWidgets)
+	{
+		if (!W || !W->GetClass()) { continue; }
+		FString ClassName = W->GetClass()->GetName();
+		// Generated BP class names end with _C; strip for comparison.
+		if (ClassName.EndsWith(TEXT("_C")))
+		{
+			ClassName = ClassName.LeftChop(2);
+		}
+		const FString ClassPath = W->GetClass()->GetPathName();
+		if (ClassName.Equals(FilterShort, ESearchCase::IgnoreCase) ||
+			ClassPath.Contains(FilterShort))
+		{
+			Matches.Add(W);
+		}
+	}
+
+	if (Matches.Num() == 0)
+	{
+		OutError = FString::Printf(
+			TEXT("No UUserWidget instance matches '%s' in PIE world (checked %d widgets)"),
+			*WidgetClassFilter, AllUserWidgets.Num());
+		return false;
+	}
+	if (InstanceIndex < 0 || InstanceIndex >= Matches.Num())
+	{
+		OutError = FString::Printf(
+			TEXT("instance_index %d out of range (found %d matches for '%s')"),
+			InstanceIndex, Matches.Num(), *WidgetClassFilter);
+		return false;
+	}
+
+	UUserWidget* Picked = Matches[InstanceIndex];
+
+	// Resolve inner widget if requested. UUserWidget::WidgetTree owns the
+	// child widgets; GetWidgetFromName walks by FName.
+	UWidget* Target = Picked;
+	if (!InnerWidgetName.IsEmpty())
+	{
+		UWidget* Inner = Picked->GetWidgetFromName(FName(*InnerWidgetName));
+		if (!Inner)
+		{
+			OutError = FString::Printf(
+				TEXT("widget_name '%s' not found inside '%s'"),
+				*InnerWidgetName, *Picked->GetName());
+			return false;
+		}
+		Target = Inner;
+	}
+
+	const FGeometry& Geo = Target->GetCachedGeometry();
+	const FVector2D AbsPos = FVector2D(Geo.GetAbsolutePosition());
+	const FVector2D AbsSize = FVector2D(Geo.GetAbsoluteSize());
+	if (AbsSize.IsNearlyZero())
+	{
+		OutError = FString::Printf(
+			TEXT("Widget '%s' has zero cached geometry — not laid out yet?"),
+			*Target->GetName());
+		return false;
+	}
+
+	OutAbsCenter = AbsPos + AbsSize * 0.5;
+	OutResolvedName = FString::Printf(TEXT("%s/%s"), *Picked->GetName(), *Target->GetName());
+	return true;
+}
+
+FMCPToolResult FMCPTool_PIEInput::ExecuteMouse(const TSharedRef<FJsonObject>& Params)
+{
+	const double X = ExtractOptionalNumber<double>(Params, TEXT("x"), 0.0);
+	const double Y = ExtractOptionalNumber<double>(Params, TEXT("y"), 0.0);
+	const FString ButtonName = ExtractOptionalString(Params, TEXT("button"), TEXT("Left"));
+	const FString EventType = ExtractOptionalString(Params, TEXT("event"), TEXT("click"));
+
+	FKey Button;
+	if (!ResolveMouseButtonKey(ButtonName, Button))
+	{
+		return FMCPToolResult::Error(FString::Printf(
+			TEXT("Unknown button '%s'. Valid: Left, Right, Middle"), *ButtonName));
+	}
+
+	FString Err;
+	if (!FireSlateMouseEvent(X, Y, Button, EventType, Err))
+	{
+		return FMCPToolResult::Error(Err);
+	}
+
+	UE_LOG(LogUnrealClaude, Log,
+		TEXT("PIE input: mouse event=%s button=%s at (%.1f, %.1f)"),
+		*EventType, *ButtonName, X, Y);
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("applied"), TEXT("mouse"));
+	Data->SetStringField(TEXT("button"), ButtonName);
+	Data->SetStringField(TEXT("event"), EventType);
+	Data->SetNumberField(TEXT("x"), X);
+	Data->SetNumberField(TEXT("y"), Y);
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Slate mouse '%s' fired at (%.0f, %.0f)"), *EventType, X, Y), Data);
+}
+
+FMCPToolResult FMCPTool_PIEInput::ExecuteClickWidget(const TSharedRef<FJsonObject>& Params)
+{
+	FString WidgetClass;
+	TOptional<FMCPToolResult> ParamError;
+	if (!ExtractRequiredString(Params, TEXT("widget_class"), WidgetClass, ParamError))
+	{
+		return ParamError.GetValue();
+	}
+
+	const FString InnerName = ExtractOptionalString(Params, TEXT("widget_name"), FString());
+	const int32 InstanceIndex = ExtractOptionalNumber<int32>(Params, TEXT("instance_index"), 0);
+	const FString ButtonName = ExtractOptionalString(Params, TEXT("button"), TEXT("Left"));
+	const FString EventType = ExtractOptionalString(Params, TEXT("event"), TEXT("click"));
+
+	FKey Button;
+	if (!ResolveMouseButtonKey(ButtonName, Button))
+	{
+		return FMCPToolResult::Error(FString::Printf(
+			TEXT("Unknown button '%s'. Valid: Left, Right, Middle"), *ButtonName));
+	}
+
+	FVector2D AbsCenter;
+	FString ResolvedName;
+	FString Err;
+	if (!ResolveWidgetCenter(WidgetClass, InnerName, InstanceIndex,
+		AbsCenter, ResolvedName, Err))
+	{
+		return FMCPToolResult::Error(Err);
+	}
+
+	if (!FireSlateMouseEvent(AbsCenter.X, AbsCenter.Y, Button, EventType, Err))
+	{
+		return FMCPToolResult::Error(Err);
+	}
+
+	UE_LOG(LogUnrealClaude, Log,
+		TEXT("PIE input: click_widget '%s' (instance %d, inner='%s') -> (%.1f, %.1f) event=%s button=%s"),
+		*WidgetClass, InstanceIndex, *InnerName, AbsCenter.X, AbsCenter.Y, *EventType, *ButtonName);
+
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("applied"), TEXT("click_widget"));
+	Data->SetStringField(TEXT("widget_class"), WidgetClass);
+	Data->SetStringField(TEXT("widget_name"), InnerName);
+	Data->SetNumberField(TEXT("instance_index"), InstanceIndex);
+	Data->SetStringField(TEXT("resolved_widget"), ResolvedName);
+	Data->SetStringField(TEXT("button"), ButtonName);
+	Data->SetStringField(TEXT("event"), EventType);
+	Data->SetNumberField(TEXT("x"), AbsCenter.X);
+	Data->SetNumberField(TEXT("y"), AbsCenter.Y);
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Clicked widget '%s' at (%.0f, %.0f)"), *ResolvedName, AbsCenter.X, AbsCenter.Y),
+		Data);
 }
