@@ -339,17 +339,43 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 		Output += LogText;
 	}
 
+	// Re-resolve the editor world AFTER script execution. If the script called
+	// LevelEditorSubsystem.load_level()/new_level(), GWorld was swapped and the
+	// `World` pointer captured at line 298 now references a torn-down UWorld
+	// whose ULevel::Actors TObjectPtr<AActor> entries are unresolvable
+	// ObjectHandles. Iterating via TActorIterator<AActor>(OldWorld) crashes in
+	// FActorIteratorState's ConstructItems<TObjectPtr<AActor>> -> ResolveObjectHandle.
+	//
+	// Fix: fetch the current world and compare pointers. If they differ (world
+	// swap detected) or the new pointer is invalid, skip the post-script actor
+	// count entirely — the "before" sample is meaningless against a different
+	// world anyway. Otherwise sample on the live, still-valid world.
+	UWorld* WorldAfter = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	const bool bWorldSwapped = (WorldAfter != World);
+
 	int32 ActorCountAfter = 0;
-	for (TActorIterator<AActor> It(World); It; ++It)
+	int32 ActorsCreated = 0;
+	if (!bWorldSwapped && IsValid(WorldAfter))
 	{
-		ActorCountAfter++;
+		for (TActorIterator<AActor> It(WorldAfter); It; ++It)
+		{
+			ActorCountAfter++;
+		}
+		ActorsCreated = ActorCountAfter - ActorCountBefore;
 	}
-	int32 ActorsCreated = ActorCountAfter - ActorCountBefore;
 
 	UE_LOG(LogUnrealClaude, Log, TEXT("Python script output (%d chars): %s"),
 		Output.Len(), Output.Len() > 500 ? *(Output.Left(500) + TEXT("...")) : *Output);
-	UE_LOG(LogUnrealClaude, Log, TEXT("Python script actor delta: %d before, %d after (%+d)"),
-		ActorCountBefore, ActorCountAfter, ActorsCreated);
+	if (bWorldSwapped)
+	{
+		UE_LOG(LogUnrealClaude, Log,
+			TEXT("Python script swapped editor world (load_level/new_level) — skipped post-script actor delta"));
+	}
+	else
+	{
+		UE_LOG(LogUnrealClaude, Log, TEXT("Python script actor delta: %d before, %d after (%+d)"),
+			ActorCountBefore, ActorCountAfter, ActorsCreated);
+	}
 
 	// Heuristic scan for Python error markers — Python exceptions don't fail the console exec, so we sniff the text
 	bool bHasError = Output.Contains(TEXT("Traceback")) ||
@@ -378,7 +404,11 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 	}
 
 	FString FullOutput = Output;
-	if (ActorsCreated > 0)
+	if (bWorldSwapped)
+	{
+		FullOutput += TEXT("\n[NOTE: Editor world was swapped (load_level/new_level) — actor delta unavailable]");
+	}
+	else if (ActorsCreated > 0)
 	{
 		FullOutput += FString::Printf(TEXT("\n[%d new actors added to level]"), ActorsCreated);
 	}
