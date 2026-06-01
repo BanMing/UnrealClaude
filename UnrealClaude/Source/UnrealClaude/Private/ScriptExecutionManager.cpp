@@ -301,6 +301,59 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 		return FScriptExecutionResult::Error(TEXT("No active world"));
 	}
 
+	// ---------------------------------------------------------------------
+	// Pre-execution deny-list scan.
+	//
+	// GEditor->Exec(py "...") runs the user's Python script synchronously on
+	// the game thread inside this process. A handful of unreal.* APIs are
+	// known to crash the editor (Slate access violations, world-iterator
+	// invalidation) when invoked through this MCP path. Once Exec is called
+	// there is no opportunity to recover — the process is dead before the
+	// task queue can report failure to the MCP client.
+	//
+	// Fail fast here with a clear error + recommended alternative so the
+	// agent can self-correct without taking the editor down. The check is a
+	// simple substring scan: false positives (e.g. the API name appearing
+	// inside a comment) are accepted in exchange for zero ambiguity in the
+	// error message.
+	// ---------------------------------------------------------------------
+	struct FDeniedPythonAPI
+	{
+		const TCHAR* Pattern;       // Substring that triggers the deny check
+		const TCHAR* Reason;        // Human-readable cause
+		const TCHAR* Alternative;   // Suggested replacement
+	};
+
+	static const FDeniedPythonAPI DeniedAPIs[] = {
+		{
+			TEXT("open_editor_for_assets"),
+			TEXT("AssetEditorSubsystem.open_editor_for_assets() crashes the editor with a Slate access violation when opening UMG/Blueprint asset editors through the MCP Python path (observed on UE 5.7)."),
+			TEXT("Use the umg_query / umg_modify MCP tools to inspect/edit widget trees without opening the editor, or ask the user to open the asset manually before running the script.")
+		},
+		{
+			TEXT("AssetEditorSubsystem()"),
+			TEXT("`unreal.AssetEditorSubsystem()` invokes the legacy constructor that has been deprecated since UE 5.2 — behaviour is undefined and frequently crashes."),
+			TEXT("Use `unreal.get_editor_subsystem(unreal.AssetEditorSubsystem)` to obtain the subsystem instance.")
+		},
+	};
+
+	for (const FDeniedPythonAPI& Denied : DeniedAPIs)
+	{
+		if (ScriptContent.Contains(Denied.Pattern))
+		{
+			FString ErrorMessage = FString::Printf(
+				TEXT("Python script rejected: contains denied API '%s'.\n\nReason: %s\n\nAlternative: %s"),
+				Denied.Pattern,
+				Denied.Reason,
+				Denied.Alternative
+			);
+			UE_LOG(LogUnrealClaude, Warning,
+				TEXT("execute_script (python) denied — pattern '%s' detected in script content"),
+				Denied.Pattern);
+			return FScriptExecutionResult::Error(ErrorMessage);
+		}
+	}
+
 	FString ScriptName = GenerateScriptName(EScriptType::Python, Description);
 	FString FilePath = WriteScriptFile(ScriptContent, EScriptType::Python, ScriptName);
 
