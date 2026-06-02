@@ -24,6 +24,8 @@
 #include "Components/Widget.h"
 #include "GenericPlatform/GenericWindow.h"
 #include "Widgets/SWindow.h"
+#include "Engine/GameViewportClient.h"
+#include "Widgets/SViewport.h"
 
 UWorld* FMCPTool_PIEInput::GetPIEWorld()
 {
@@ -49,6 +51,54 @@ APlayerController* FMCPTool_PIEInput::GetPlayerController(int32 PlayerIndex)
 		return nullptr;
 	}
 	return UGameplayStatics::GetPlayerController(PIEWorld, PlayerIndex);
+}
+
+bool FMCPTool_PIEInput::ResolveViewportAbsoluteOffset(FVector2D& OutOffset, FString& OutError)
+{
+	// Step 1 — locate the PIE world. Without an active PIE the viewport
+	// frame is undefined; callers that need 'viewport' coord_space must
+	// have a PIE session running.
+	UWorld* PIEWorld = GetPIEWorld();
+	if (!PIEWorld)
+	{
+		OutError = TEXT("coord_space='viewport' requires an active PIE session");
+		return false;
+	}
+
+	// Step 2 — the UGameViewportClient owns the SViewport widget. In
+	// PIE-in-Editor the SViewport is hosted as a child Slate widget under
+	// the LevelEditor tab; its cached geometry holds the absolute screen
+	// position we need.
+	UGameViewportClient* ViewportClient = PIEWorld->GetGameViewport();
+	if (!ViewportClient)
+	{
+		OutError = TEXT("PIE world has no GameViewportClient");
+		return false;
+	}
+
+	// Step 3 — pull the SViewport. GetGameViewportWidget returns the
+	// platform Slate widget the engine renders into; it is the canonical
+	// frame for "viewport-relative" pixel coordinates.
+	TSharedPtr<SViewport> ViewportWidget = ViewportClient->GetGameViewportWidget();
+	if (!ViewportWidget.IsValid())
+	{
+		OutError = TEXT("PIE viewport widget is not yet realized (try again after the first frame)");
+		return false;
+	}
+
+	// Step 4 — read the cached geometry. If the widget has zero size the
+	// layout pass hasn't run yet — surface a distinct error so the caller
+	// knows to retry rather than silently dispatching at (0,0) absolute.
+	const FGeometry& Geo = ViewportWidget->GetCachedGeometry();
+	const FVector2D AbsSize = FVector2D(Geo.GetAbsoluteSize());
+	if (AbsSize.IsNearlyZero())
+	{
+		OutError = TEXT("PIE viewport widget has zero cached geometry; layout pass has not yet run");
+		return false;
+	}
+
+	OutOffset = FVector2D(Geo.GetAbsolutePosition());
+	return true;
 }
 
 FMCPToolResult FMCPTool_PIEInput::Execute(const TSharedRef<FJsonObject>& Params)
@@ -646,16 +696,41 @@ bool FMCPTool_PIEInput::ResolveWidgetCenter(const FString& WidgetClassFilter,
 
 FMCPToolResult FMCPTool_PIEInput::ExecuteMouse(const TSharedRef<FJsonObject>& Params)
 {
-	const double X = ExtractOptionalNumber<double>(Params, TEXT("x"), 0.0);
-	const double Y = ExtractOptionalNumber<double>(Params, TEXT("y"), 0.0);
+	const double InX = ExtractOptionalNumber<double>(Params, TEXT("x"), 0.0);
+	const double InY = ExtractOptionalNumber<double>(Params, TEXT("y"), 0.0);
 	const FString ButtonName = ExtractOptionalString(Params, TEXT("button"), TEXT("Left"));
 	const FString EventType = ExtractOptionalString(Params, TEXT("event"), TEXT("click"));
+	const FString CoordSpace = ExtractOptionalString(Params, TEXT("coord_space"), TEXT("absolute"));
 
 	FKey Button;
 	if (!ResolveMouseButtonKey(ButtonName, Button))
 	{
 		return FMCPToolResult::Error(FString::Printf(
 			TEXT("Unknown button '%s'. Valid: Left, Right, Middle"), *ButtonName));
+	}
+
+	// Translate caller-supplied (x, y) into the absolute screen frame
+	// FireSlateMouseEvent expects. v1 callers used absolute pixels with
+	// no coord_space param — preserve that contract by keeping 'absolute'
+	// as the default. 'viewport' is the recommended frame for new callers
+	// that measure coordinates against a PIE-window-relative reference.
+	double X = InX;
+	double Y = InY;
+	if (CoordSpace.Equals(TEXT("viewport"), ESearchCase::IgnoreCase))
+	{
+		FVector2D Offset(0.0, 0.0);
+		FString OffsetErr;
+		if (!ResolveViewportAbsoluteOffset(Offset, OffsetErr))
+		{
+			return FMCPToolResult::Error(OffsetErr);
+		}
+		X += Offset.X;
+		Y += Offset.Y;
+	}
+	else if (!CoordSpace.Equals(TEXT("absolute"), ESearchCase::IgnoreCase))
+	{
+		return FMCPToolResult::Error(FString::Printf(
+			TEXT("Unknown coord_space '%s'. Valid: absolute, viewport"), *CoordSpace));
 	}
 
 	FString Err;
@@ -665,17 +740,20 @@ FMCPToolResult FMCPTool_PIEInput::ExecuteMouse(const TSharedRef<FJsonObject>& Pa
 	}
 
 	UE_LOG(LogUnrealClaude, Log,
-		TEXT("PIE input: mouse event=%s button=%s at (%.1f, %.1f)"),
-		*EventType, *ButtonName, X, Y);
+		TEXT("PIE input: mouse event=%s button=%s coord_space=%s in=(%.1f, %.1f) abs=(%.1f, %.1f)"),
+		*EventType, *ButtonName, *CoordSpace, InX, InY, X, Y);
 
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetStringField(TEXT("applied"), TEXT("mouse"));
 	Data->SetStringField(TEXT("button"), ButtonName);
 	Data->SetStringField(TEXT("event"), EventType);
-	Data->SetNumberField(TEXT("x"), X);
-	Data->SetNumberField(TEXT("y"), Y);
+	Data->SetStringField(TEXT("coord_space"), CoordSpace);
+	Data->SetNumberField(TEXT("x"), InX);
+	Data->SetNumberField(TEXT("y"), InY);
+	Data->SetNumberField(TEXT("abs_x"), X);
+	Data->SetNumberField(TEXT("abs_y"), Y);
 	return FMCPToolResult::Success(
-		FString::Printf(TEXT("Slate mouse '%s' fired at (%.0f, %.0f)"), *EventType, X, Y), Data);
+		FString::Printf(TEXT("Slate mouse '%s' fired at abs (%.0f, %.0f)"), *EventType, X, Y), Data);
 }
 
 FMCPToolResult FMCPTool_PIEInput::ExecuteClickWidget(const TSharedRef<FJsonObject>& Params)

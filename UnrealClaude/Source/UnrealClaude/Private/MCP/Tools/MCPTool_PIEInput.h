@@ -27,11 +27,20 @@
  *  - axis:          Drive an axis input (axis_name + value)
  *  - move_to:       Teleport the controlled pawn to a world location (SetActorLocation)
  *  - look_at:       Rotate the player controller to face a world location (SetControlRotation)
- *  - mouse:         Inject a Slate-routed mouse event at absolute screen coords
+ *  - mouse:         Inject a Slate-routed mouse event at screen coords
  *                   (cursor positioned + ProcessMouseButtonDown/Up dispatched so UMG
  *                   widgets receive the press). The legacy 'key' action with
  *                   LeftMouseButton goes through PlayerInput and bypasses Slate's
  *                   UMG event chain — 'mouse' is the right call for hand-card clicks.
+ *                   The coord_space parameter selects the coordinate frame: "absolute"
+ *                   treats (x, y) as DPI-scaled screen pixels (the default; preserved
+ *                   for backwards compatibility with v1 callers); "viewport" treats
+ *                   (x, y) as relative to the PIE viewport widget's top-left, with
+ *                   the SViewport's cached absolute position auto-added before
+ *                   dispatch — this is the correct frame when the agent measured
+ *                   coordinates against a viewport-relative reference (e.g. a
+ *                   PIE-in-Editor screenshot whose origin is the viewport, not the
+ *                   OS desktop) and avoids the PIE-window offset bug.
  *  - click_widget:  Resolve a UUserWidget by class name / instance index (and
  *                   optionally an inner-tree FName for the hit target), compute its
  *                   absolute cached geometry center, then fire a Slate mouse event
@@ -68,12 +77,18 @@ public:
 			"- 'move_to':       TELEPORT the controlled pawn to (x,y,z). v1 = direct SetActorLocation;\n"
 			"                   NavMesh pathfinding is deferred to a follow-up.\n"
 			"- 'look_at':       Rotate the player controller to face (x,y,z) via SetControlRotation.\n"
-			"- 'mouse':         Slate-routed mouse event at absolute screen pixels (x, y).\n"
+			"- 'mouse':         Slate-routed mouse event at screen coords (x, y).\n"
 			"                   Use 'button' (Left|Right|Middle, default Left) and 'event'\n"
 			"                   (click|down|up|move, default click). UMG widgets receive\n"
 			"                   the press — this is the correct path for clicking hand\n"
 			"                   cards / HUD buttons. PlayerInput key injection does NOT route\n"
 			"                   through Slate.\n"
+			"                   'coord_space' selects the (x, y) frame: 'absolute' (default,\n"
+			"                   v1-compatible) = DPI-scaled OS screen pixels;\n"
+			"                   'viewport' = relative to the PIE viewport widget's top-left\n"
+			"                   (the SViewport absolute position is auto-added before dispatch).\n"
+			"                   Use 'viewport' when measuring against PIE-window-relative\n"
+			"                   reference frames (e.g. screenshots that crop the viewport).\n"
 			"- 'click_widget':  Resolve a UUserWidget by 'widget_class' (class short name or\n"
 			"                   asset path) and optional 'widget_name' (FName inside the\n"
 			"                   widget tree of the matched UUserWidget). Picks the\n"
@@ -101,7 +116,8 @@ public:
 			FMCPToolParameter(TEXT("event"), TEXT("string"), TEXT("Mouse event for 'mouse' / 'click_widget': click | down | up | move (default click)"), false, TEXT("click")),
 			FMCPToolParameter(TEXT("widget_class"), TEXT("string"), TEXT("UUserWidget class short name or asset path for 'click_widget' (e.g. 'WBP_HandCard' or '/Game/UI/WBP_HandCard')"), false),
 			FMCPToolParameter(TEXT("widget_name"), TEXT("string"), TEXT("Optional inner FName to click within the matched UUserWidget tree; if omitted, click the root widget center"), false),
-			FMCPToolParameter(TEXT("instance_index"), TEXT("number"), TEXT("Which match to pick when multiple instances of widget_class exist (default 0)"), false, TEXT("0"))
+			FMCPToolParameter(TEXT("instance_index"), TEXT("number"), TEXT("Which match to pick when multiple instances of widget_class exist (default 0)"), false, TEXT("0")),
+			FMCPToolParameter(TEXT("coord_space"), TEXT("string"), TEXT("Coordinate frame for 'mouse' (x, y): 'absolute' (default, DPI-scaled OS screen pixels) or 'viewport' (PIE viewport widget relative — SViewport absolute position is auto-added before dispatch)"), false, TEXT("absolute"))
 		};
 		Info.Annotations = FMCPToolAnnotations::Modifying();
 		return Info;
@@ -124,6 +140,23 @@ private:
 
 	/** Resolve the player controller for the given index in the active PIE world */
 	static class APlayerController* GetPlayerController(int32 PlayerIndex);
+
+	/**
+	 * Resolve the absolute screen-space position of the PIE viewport widget's
+	 * top-left corner. Used to translate caller-supplied viewport-relative
+	 * coordinates to the absolute frame FireSlateMouseEvent expects.
+	 *
+	 * Steps:
+	 *   1. Find the active PIE world via GetPIEWorld().
+	 *   2. Query its UGameViewportClient (PIEWorld->GetGameViewport()).
+	 *   3. Resolve the SViewport widget via GetGameViewportWidget().
+	 *   4. Read the cached geometry's absolute position.
+	 *
+	 * @param OutOffset  Receives the SViewport's absolute top-left on success.
+	 * @param OutError   Set on failure (no PIE / viewport not laid out yet).
+	 * @return true on success.
+	 */
+	static bool ResolveViewportAbsoluteOffset(FVector2D& OutOffset, FString& OutError);
 
 	/**
 	 * Fire a Slate-routed mouse event at absolute screen coords.
