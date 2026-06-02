@@ -26,6 +26,8 @@ namespace UMGModifyOps
     static const FString SetWidgetProperties = TEXT("set_widget_properties");
     static const FString DeleteWidget = TEXT("delete_widget");
     static const FString ReparentWidget = TEXT("reparent_widget");
+    static const FString SetRootWidget = TEXT("set_root_widget");
+    static const FString ReplaceWidget = TEXT("replace_widget");
     static const FString SaveAsset = TEXT("save_asset");
 }
 
@@ -46,10 +48,12 @@ FMCPToolResult FMCPTool_UMGModify::Execute(const TSharedRef<FJsonObject>& Params
     if (Operation == UMGModifyOps::SetWidgetProperties)  { return ExecuteSetWidgetProperties(Params); }
     if (Operation == UMGModifyOps::DeleteWidget)         { return ExecuteDeleteWidget(Params); }
     if (Operation == UMGModifyOps::ReparentWidget)       { return ExecuteReparentWidget(Params); }
+    if (Operation == UMGModifyOps::SetRootWidget)        { return ExecuteSetRootWidget(Params); }
+    if (Operation == UMGModifyOps::ReplaceWidget)        { return ExecuteReplaceWidget(Params); }
     if (Operation == UMGModifyOps::SaveAsset)            { return ExecuteSaveAsset(Params); }
 
     return FMCPToolResult::Error(FString::Printf(
-        TEXT("Unknown operation: '%s'. Valid: create_widget, set_widget_properties, delete_widget, reparent_widget, save_asset"),
+        TEXT("Unknown operation: '%s'. Valid: create_widget, set_widget_properties, delete_widget, reparent_widget, set_root_widget, replace_widget, save_asset"),
         *Operation));
 }
 
@@ -425,6 +429,255 @@ FMCPToolResult FMCPTool_UMGModify::ExecuteReparentWidget(const TSharedRef<FJsonO
 
     return FMCPToolResult::Success(
         FString::Printf(TEXT("Reparented %s -> %s"), *WidgetName, *ParentName),
+        Result);
+}
+
+/**
+ * ExecuteSetRootWidget — promote an existing UPanelWidget in the tree to be
+ * the WidgetTree's RootWidget.
+ *
+ * Use case: a script wants to swap the outermost container (e.g. replace a
+ * UCanvasPanel root with a USizeBox root for a constrained-size widget).
+ * Without this op the caller has to create the new root, delete the old
+ * root, and then manually wire children — error-prone.
+ *
+ * Steps:
+ *   1. Resolve blueprint + widget_name.
+ *   2. The named widget must already exist in the tree (caller is expected
+ *      to create it first via create_widget). It must be a UPanelWidget
+ *      subclass (UWidgetTree::RootWidget contract).
+ *   3. Detach from its current parent (if any) — RootWidget cannot be a
+ *      child of another panel simultaneously.
+ *   4. Assign Tree->RootWidget; mark blueprint structurally modified so
+ *      the editor recompiles bindings against the new root.
+ */
+FMCPToolResult FMCPTool_UMGModify::ExecuteSetRootWidget(const TSharedRef<FJsonObject>& Params)
+{
+    FString BPPath;
+    TOptional<FMCPToolResult> Error;
+    if (!ExtractAndValidate(Params, TEXT("widget_blueprint_path"),
+        FMCPParamValidator::ValidateBlueprintPath, BPPath, Error))
+    {
+        return Error.GetValue();
+    }
+
+    FString WidgetName;
+    if (!ExtractRequiredString(Params, TEXT("widget_name"), WidgetName, Error))
+    {
+        return Error.GetValue();
+    }
+
+    // Step 2 — load + locate the widget.
+    FString LoadError;
+    UWidgetBlueprint* WBP = UMGCommonUtils::LoadWidgetBlueprint(BPPath, LoadError);
+    if (!WBP) { return FMCPToolResult::Error(LoadError); }
+    UWidgetTree* Tree = WBP->WidgetTree;
+    if (!Tree)
+    {
+        return FMCPToolResult::Error(TEXT("WidgetBlueprint has no WidgetTree"));
+    }
+
+    UWidget* Target = UMGCommonUtils::FindWidgetByName(WBP, FName(*WidgetName));
+    if (!Target)
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Widget '%s' not found in tree (create it first via create_widget)"), *WidgetName));
+    }
+
+    UPanelWidget* TargetPanel = Cast<UPanelWidget>(Target);
+    if (!TargetPanel)
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Widget '%s' is not a UPanelWidget subclass; only panels can be the tree root"), *WidgetName));
+    }
+
+    // Step 3 — detach from any existing parent so we don't leave the widget
+    // dual-parented (root + child of another panel) which violates the
+    // WidgetTree invariant.
+    if (UPanelWidget* OldParent = TargetPanel->GetParent())
+    {
+        OldParent->RemoveChild(TargetPanel);
+    }
+
+    // Step 4 — assign root and mark dirty. The previous root and its
+    // descendants are orphaned — the editor compile pass will warn about
+    // unreferenced widgets so the caller can delete them explicitly if
+    // desired.
+    UWidget* PreviousRoot = Tree->RootWidget;
+    Tree->RootWidget = TargetPanel;
+    Tree->Modify();
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("widget_blueprint_path"), BPPath);
+    Result->SetStringField(TEXT("widget_name"), WidgetName);
+    Result->SetStringField(TEXT("previous_root"),
+        PreviousRoot ? PreviousRoot->GetName() : FString(TEXT("(none)")));
+
+    return FMCPToolResult::Success(
+        FString::Printf(TEXT("Set tree root to '%s' in %s (previous: %s)"),
+            *WidgetName, *BPPath,
+            PreviousRoot ? *PreviousRoot->GetName() : TEXT("(none)")),
+        Result);
+}
+
+/**
+ * ExecuteReplaceWidget — delete a widget and create a replacement at the
+ * same parent + sibling index in one atomic call.
+ *
+ * Use case: swap a UTextBlock for a UCommonTextBlock (or any class change)
+ * without losing the layout slot in the parent panel. Slot properties are
+ * NOT cloned (different panel slot types carry different fields); callers
+ * are expected to re-apply slot config via set_widget_properties after.
+ *
+ * Steps:
+ *   1. Resolve blueprint + target widget_name + replacement_name + replacement_type.
+ *   2. Capture old widget's parent + sibling index.
+ *   3. Resolve replacement UClass; verify UWidget subclass.
+ *   4. Remove old widget from parent; strip GUID binding.
+ *   5. Construct the replacement under the WidgetTree.
+ *   6. Add replacement back to the parent — if a sibling index was captured,
+ *      shift it into that position via RemoveChild + InsertChildAt.
+ *   7. Register GUID for replacement; mark blueprint dirty.
+ */
+FMCPToolResult FMCPTool_UMGModify::ExecuteReplaceWidget(const TSharedRef<FJsonObject>& Params)
+{
+    FString BPPath;
+    TOptional<FMCPToolResult> Error;
+    if (!ExtractAndValidate(Params, TEXT("widget_blueprint_path"),
+        FMCPParamValidator::ValidateBlueprintPath, BPPath, Error))
+    {
+        return Error.GetValue();
+    }
+
+    FString WidgetName;
+    if (!ExtractRequiredString(Params, TEXT("widget_name"), WidgetName, Error))
+    {
+        return Error.GetValue();
+    }
+
+    FString ReplacementName;
+    if (!ExtractRequiredString(Params, TEXT("replacement_name"), ReplacementName, Error))
+    {
+        return Error.GetValue();
+    }
+
+    FString ReplacementType;
+    if (!ExtractRequiredString(Params, TEXT("replacement_type"), ReplacementType, Error))
+    {
+        return Error.GetValue();
+    }
+
+    const bool bIsVariable = ExtractOptionalBool(Params, TEXT("is_variable"), true);
+
+    // Step 2 — load blueprint + locate target + capture parent slot info.
+    FString LoadError;
+    UWidgetBlueprint* WBP = UMGCommonUtils::LoadWidgetBlueprint(BPPath, LoadError);
+    if (!WBP) { return FMCPToolResult::Error(LoadError); }
+    UWidgetTree* Tree = WBP->WidgetTree;
+    if (!Tree)
+    {
+        return FMCPToolResult::Error(TEXT("WidgetBlueprint has no WidgetTree"));
+    }
+
+    UWidget* OldWidget = UMGCommonUtils::FindWidgetByName(WBP, FName(*WidgetName));
+    if (!OldWidget)
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Widget '%s' not found"), *WidgetName));
+    }
+
+    UPanelWidget* OldParent = OldWidget->GetParent();
+    const bool bWasRoot = (Tree->RootWidget == OldWidget);
+    int32 SiblingIndex = INDEX_NONE;
+    if (OldParent)
+    {
+        SiblingIndex = OldParent->GetChildIndex(OldWidget);
+    }
+
+    // Step 3 — resolve replacement class.
+    UClass* ReplacementClass = UMGCommonUtils::ResolveWidgetClass(ReplacementType);
+    if (!ReplacementClass)
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Could not resolve replacement type: %s"), *ReplacementType));
+    }
+    if (!ReplacementClass->IsChildOf(UWidget::StaticClass()))
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Resolved class %s is not a UWidget subclass"), *ReplacementClass->GetName()));
+    }
+
+    // If we are replacing the root, the new widget must itself be a panel
+    // (root contract). Catch this up front so we don't tear out the old
+    // root and end up with an invalid tree on failure.
+    if (bWasRoot && !ReplacementClass->IsChildOf(UPanelWidget::StaticClass()))
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Target '%s' is the tree root; replacement type %s must be a UPanelWidget subclass"),
+            *WidgetName, *ReplacementClass->GetName()));
+    }
+
+    // Step 4 — detach the old widget. RemoveChild on the parent cleans up
+    // the panel slot binding; for the root case, null out Tree->RootWidget.
+    if (OldParent)
+    {
+        OldParent->RemoveChild(OldWidget);
+    }
+    else if (bWasRoot)
+    {
+        Tree->RootWidget = nullptr;
+    }
+    WBP->WidgetVariableNameToGuidMap.Remove(OldWidget->GetFName());
+
+    // Step 5 — construct the replacement under the same tree.
+    UWidget* NewWidget = Tree->ConstructWidget<UWidget>(ReplacementClass, FName(*ReplacementName));
+    if (!NewWidget)
+    {
+        return FMCPToolResult::Error(FString::Printf(
+            TEXT("Failed to construct replacement widget of type %s"), *ReplacementClass->GetName()));
+    }
+    NewWidget->bIsVariable = bIsVariable;
+
+    // Step 6 — re-attach. Insert at the captured sibling index so the new
+    // widget occupies the exact slot the old one held.
+    if (OldParent)
+    {
+        OldParent->AddChild(NewWidget);
+        if (SiblingIndex != INDEX_NONE)
+        {
+            // AddChild appends at end; UPanelWidget::ShiftChild reorders
+            // the slots TArray so the child ends up at the captured sibling
+            // index. ShiftChild clamps internally if the index exceeds the
+            // current child count.
+            const int32 AppendedIndex = OldParent->GetChildIndex(NewWidget);
+            if (AppendedIndex != SiblingIndex)
+            {
+                OldParent->ShiftChild(SiblingIndex, NewWidget);
+            }
+        }
+    }
+    else if (bWasRoot)
+    {
+        Tree->RootWidget = NewWidget;
+    }
+
+    // Step 7 — GUID + structural mark.
+    EnsureWidgetVariableGuid(WBP, NewWidget);
+    Tree->Modify();
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("widget_blueprint_path"), BPPath);
+    Result->SetStringField(TEXT("deleted_widget"), WidgetName);
+    Result->SetStringField(TEXT("created_widget"), NewWidget->GetName());
+    Result->SetStringField(TEXT("created_class"), ReplacementClass->GetName());
+    Result->SetNumberField(TEXT("sibling_index"), SiblingIndex);
+    Result->SetBoolField(TEXT("was_root"), bWasRoot);
+
+    return FMCPToolResult::Success(
+        FString::Printf(TEXT("Replaced '%s' with '%s' (%s) at sibling index %d"),
+            *WidgetName, *ReplacementName, *ReplacementClass->GetName(), SiblingIndex),
         Result);
 }
 
