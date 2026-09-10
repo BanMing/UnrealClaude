@@ -927,7 +927,10 @@ TSharedPtr<FJsonObject> FAnimationBlueprintUtils::ExecuteBatchOperations(
 				{
 					for (const auto& Pair : (*BindingsObj)->Values)
 					{
-						Bindings.Add(Pair.Key, Pair.Value->AsString());
+						// UE 5.8: JSON keys are UE::TSharedString<TCHAR> and do
+						// not implicitly convert to Bindings' FString key type.
+						// Convert via TSharedString::operator*() (const TCHAR*).
+						Bindings.Add(FString(*Pair.Key), Pair.Value->AsString());
 					}
 				}
 				bOpSuccess = SetStateBlendSpace(

@@ -588,7 +588,10 @@ FMCPToolResult FMCPTool_MaterialGraph::ExecuteSetNodeProperties(const TSharedRef
     int32 AppliedCount = 0;
     for (const auto& Pair : Props->Values)
     {
-        const FString& PropName = Pair.Key;
+        // UE 5.8: JSON keys are UE::TSharedString<TCHAR>. Materialize an
+        // FString by VALUE (not a const& binding to a temporary, which would
+        // dangle) via TSharedString::operator*() (const TCHAR*).
+        const FString PropName(*Pair.Key);
         const TSharedPtr<FJsonValue>& JsonVal = Pair.Value;
 
         FProperty* Prop = TargetObject->GetClass()->FindPropertyByName(*PropName);

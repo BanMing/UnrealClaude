@@ -531,7 +531,9 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteAddNode(const TSharedRef<FJsonOb
 				if (PinValue.Value->TryGetString(PinValueStr))
 				{
 					FString PinError;
-					FBlueprintUtils::SetPinDefaultValue(Graph, NodeId, PinValue.Key, PinValueStr, PinError);
+					// UE 5.8: JSON keys are UE::TSharedString<TCHAR>; SetPinDefaultValue
+					// takes const FString&. Convert via operator*() (const TCHAR*).
+					FBlueprintUtils::SetPinDefaultValue(Graph, NodeId, FString(*PinValue.Key), PinValueStr, PinError);
 				}
 			}
 		}
@@ -683,7 +685,9 @@ bool FMCPTool_BlueprintModify::CreateNodesFromSpec(
 				if (PinValue.Value->TryGetString(PinValueStr))
 				{
 					FString PinError;
-					FBlueprintUtils::SetPinDefaultValue(Graph, NodeId, PinValue.Key, PinValueStr, PinError);
+					// UE 5.8: JSON keys are UE::TSharedString<TCHAR>; SetPinDefaultValue
+					// takes const FString&. Convert via operator*() (const TCHAR*).
+					FBlueprintUtils::SetPinDefaultValue(Graph, NodeId, FString(*PinValue.Key), PinValueStr, PinError);
 				}
 			}
 		}
@@ -1284,7 +1288,9 @@ FMCPToolResult FMCPTool_BlueprintModify::ExecuteBatchModify(const TSharedRef<FJs
 							if (PinValue.Value->TryGetString(PinValueStr))
 							{
 								FString PinError;
-								FBlueprintGraphEditor::SetPinDefaultValue(Graph, NodeId, PinValue.Key, PinValueStr, PinError);
+								// UE 5.8: JSON keys are UE::TSharedString<TCHAR>; SetPinDefaultValue
+								// takes const FString&. Convert via operator*() (const TCHAR*).
+								FBlueprintGraphEditor::SetPinDefaultValue(Graph, NodeId, FString(*PinValue.Key), PinValueStr, PinError);
 							}
 						}
 					}

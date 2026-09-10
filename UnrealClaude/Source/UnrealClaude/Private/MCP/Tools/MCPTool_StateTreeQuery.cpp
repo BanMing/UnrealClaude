@@ -13,7 +13,10 @@
 #include "StateTreeTypes.h"
 #include "StateTreeIndexTypes.h"
 #include "StructUtils/InstancedStructContainer.h"
-#include "PropertyBag.h"
+// UE 5.8: PropertyBag.h moved into the StructUtils/ subdirectory of
+// CoreUObject (matching InstancedStructContainer.h above). The bare
+// "PropertyBag.h" form no longer resolves.
+#include "StructUtils/PropertyBag.h"
 
 namespace
 {

@@ -541,7 +541,9 @@ bool FMCPTool_Material::ApplyParametersFromJson(UMaterialInstanceConstant* MatIn
 			if (Pair.Value->TryGetNumber(Value))
 			{
 				FString Error;
-				if (!SetScalarParameter(MatInst, Pair.Key, static_cast<float>(Value), Error))
+				// UE 5.8: JSON keys are UE::TSharedString<TCHAR>; the parameter
+				// setters take const FString&. Convert via operator*().
+				if (!SetScalarParameter(MatInst, FString(*Pair.Key), static_cast<float>(Value), Error))
 				{
 					Errors.Add(Error);
 					bAllSuccess = false;
@@ -566,7 +568,8 @@ bool FMCPTool_Material::ApplyParametersFromJson(UMaterialInstanceConstant* MatIn
 				(*ColorObj)->TryGetNumberField(TEXT("a"), Color.A);
 
 				FString Error;
-				if (!SetVectorParameter(MatInst, Pair.Key, Color, Error))
+				// UE 5.8: see SetScalarParameter above -- TSharedString -> FString.
+				if (!SetVectorParameter(MatInst, FString(*Pair.Key), Color, Error))
 				{
 					Errors.Add(Error);
 					bAllSuccess = false;
@@ -584,7 +587,8 @@ bool FMCPTool_Material::ApplyParametersFromJson(UMaterialInstanceConstant* MatIn
 			if (Pair.Value->TryGetString(TexturePath))
 			{
 				FString Error;
-				if (!SetTextureParameter(MatInst, Pair.Key, TexturePath, Error))
+				// UE 5.8: see SetScalarParameter above -- TSharedString -> FString.
+				if (!SetTextureParameter(MatInst, FString(*Pair.Key), TexturePath, Error))
 				{
 					Errors.Add(Error);
 					bAllSuccess = false;

@@ -170,9 +170,15 @@ protected:
 		TArray<FString> Unknown;
 		for (const auto& Pair : Params->Values)
 		{
-			if (!Known.Contains(Pair.Key))
+			// UE 5.8: FJsonObject::Values keys are UE::TSharedString<TCHAR>
+			// rather than FString, and there is no implicit conversion, so
+			// TSet<FString>::Contains / TArray<FString>::Add both fail to
+			// bind. Materialize an FString once per key via
+			// TSharedString::operator*() (const TCHAR*).
+			const FString KeyStr(*Pair.Key);
+			if (!Known.Contains(KeyStr))
 			{
-				Unknown.Add(Pair.Key);
+				Unknown.Add(KeyStr);
 			}
 		}
 		return Unknown;

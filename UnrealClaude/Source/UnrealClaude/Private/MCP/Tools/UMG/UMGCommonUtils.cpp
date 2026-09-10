@@ -486,9 +486,14 @@ namespace UMGCommonUtils
         bool bAnyApplied = false;
 
         // Step 2. Walk top-level keys; intercept Brush properties; defer the rest.
-        for (TPair<FString, TSharedPtr<FJsonValue>>& Pair : JsonObject->Values)
+        // UE 5.8: FJsonObject::Values is keyed by UE::TSharedString<TCHAR>, so
+        // the explicit TPair<FString, ...> element type no longer matches the
+        // container. Use auto& and convert the key below.
+        for (auto& Pair : JsonObject->Values)
         {
-            const FString& Key = Pair.Key;
+            // Materialize by VALUE -- a const& binding to the converted
+            // temporary would dangle.
+            const FString Key(*Pair.Key);
             FProperty* Prop = Class->FindPropertyByName(*Key);
             if (!Prop)
             {

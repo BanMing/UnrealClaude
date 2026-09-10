@@ -376,7 +376,10 @@ bool FMCPTool_SetProperty::SetStructPropertyValue(FStructProperty* StructProp, v
 		for (const auto& Pair : (*ObjVal)->Values)
 		{
 			if (!bFirst) TextRepresentation += TEXT(",");
-			TextRepresentation += Pair.Key.ToUpper() + TEXT("=");
+			// UE 5.8: FJsonObject::Values keys are UE::TSharedString<TCHAR>,
+			// not FString, so ToUpper() is no longer a member. Round-trip
+			// through FString via TSharedString::operator*() (const TCHAR*).
+			TextRepresentation += FString(*Pair.Key).ToUpper() + TEXT("=");
 
 			double NumVal;
 			FString StrVal;
