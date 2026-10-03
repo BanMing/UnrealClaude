@@ -412,23 +412,49 @@ FMCPToolResult FMCPTool_UMGModify::ExecuteReparentWidget(const TSharedRef<FJsonO
         return FMCPToolResult::Error(FString::Printf(TEXT("Parent widget '%s' is not a panel"), *ParentName));
     }
 
+    // Capture the current slot BEFORE detaching, to use as a clone template
+    // below. UPanelWidget::RemoveChildAt clears Target->Slot and the slot's
+    // own Parent/Content back-pointers, but leaves every layout field
+    // untouched — so the orphaned slot object remains a valid template.
+    UPanelSlot* const OldSlot = Target->Slot;
+    UClass* const OldSlotClass = OldSlot ? OldSlot->GetClass() : nullptr;
+
     // Detach from old parent.
     if (UPanelWidget* OldParent = Target->GetParent())
     {
         OldParent->RemoveChild(Target);
     }
 
-    // Attach to new parent.
-    NewParent->AddChild(Target);
+    // Attach to new parent, cloning the old slot's layout where possible.
+    //
+    // AddChild honours the template only when the new panel's slot class
+    // matches the template's exactly; otherwise it silently constructs a
+    // default slot. That asymmetry is inherent — a UCanvasPanelSlot's
+    // anchors/offsets have no counterpart on a UVerticalBoxSlot. Report
+    // which happened so the caller knows whether a follow-up
+    // set_widget_properties is required instead of having to guess.
+    UPanelSlot* const NewSlot = NewParent->AddChild(Target, OldSlot);
+    const bool bSlotPreserved =
+        NewSlot != nullptr
+        && OldSlotClass != nullptr
+        && NewSlot->GetClass() == OldSlotClass;
 
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("widget_name"), WidgetName);
     Result->SetStringField(TEXT("new_parent"), ParentName);
+    Result->SetBoolField(TEXT("slot_preserved"), bSlotPreserved);
+    Result->SetStringField(TEXT("slot_class"),
+        NewSlot ? NewSlot->GetClass()->GetName() : FString(TEXT("(none)")));
 
     return FMCPToolResult::Success(
-        FString::Printf(TEXT("Reparented %s -> %s"), *WidgetName, *ParentName),
+        FString::Printf(
+            TEXT("Reparented %s -> %s (slot layout %s)"),
+            *WidgetName, *ParentName,
+            bSlotPreserved
+                ? TEXT("preserved")
+                : TEXT("RESET to defaults - slot class changed; re-apply Slot.* properties")),
         Result);
 }
 

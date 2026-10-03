@@ -14,7 +14,8 @@
  *   - create_widget          : add a new UWidget under a parent (auto-roots if tree is empty)
  *   - set_widget_properties  : reflect JSON onto a widget + its slot, with FSlateBrush intercept
  *   - delete_widget          : remove a widget from its parent panel
- *   - reparent_widget        : move a widget under a new panel parent
+ *   - reparent_widget        : move a widget under a new panel parent, cloning the
+ *                              old slot's layout when the slot class matches
  *   - set_root_widget        : promote an existing UPanelWidget to be the tree root
  *   - replace_widget         : delete + create at the same sibling slot in one call
  *   - save_asset             : flush the WidgetBlueprint to disk
@@ -37,7 +38,13 @@ public:
             "  create_widget         - add a new widget under parent\n"
             "  set_widget_properties - apply JSON object to a widget (and Slot)\n"
             "  delete_widget         - remove a widget from its parent\n"
-            "  reparent_widget       - re-attach to a new panel parent\n"
+            "  reparent_widget       - re-attach to a new panel parent. The old slot's layout\n"
+            "                          (alignment / size / padding / anchors) is cloned when the\n"
+            "                          new panel uses the same slot class, and RESET to defaults\n"
+            "                          when it does not (e.g. Canvas -> VerticalBox) because the\n"
+            "                          two slot types share no fields. Check slot_preserved in the\n"
+            "                          response; when false, re-apply Slot.* via\n"
+            "                          set_widget_properties. Do structural moves BEFORE styling.\n"
             "  set_root_widget       - promote an existing UPanelWidget subclass to tree root\n"
             "                          (the previous root and its descendants are dropped from the\n"
             "                          tree; pass an existing widget_name that has been detached or\n"
