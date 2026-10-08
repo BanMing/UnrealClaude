@@ -26,6 +26,7 @@
 #include "Widgets/SBoxPanel.h"
 #include "Styling/AppStyle.h"
 #include "Styling/CoreStyle.h"
+#include "Framework/Application/SlateApplication.h"
 #include "HAL/PlatformApplicationMisc.h"
 
 #define LOCTEXT_NAMESPACE "UnrealClaude"
@@ -188,10 +189,26 @@ void SChatMessage::Construct(const FArguments& InArgs)
 				.AutoHeight()
 				.Padding(0, 0, 0, 6)
 				[
-					SNew(STextBlock)
-					.Text(FText::FromString(RoleLabel))
-					.TextStyle(FAppStyle::Get(), "SmallText")
-					.ColorAndOpacity(FSlateColor(RoleLabelColor))
+					SNew(SHorizontalBox)
+
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(RoleLabel))
+						.TextStyle(FAppStyle::Get(), "SmallText")
+						.ColorAndOpacity(FSlateColor(RoleLabelColor))
+					]
+
+					// Per-message copy button (on both user and Claude messages)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					[
+						SNew(SCopyButton)
+						.OnGetText_Lambda([Message]() { return Message; })
+					]
 				]
 
 				+ SVerticalBox::Slot()
@@ -202,6 +219,67 @@ void SChatMessage::Construct(const FArguments& InArgs)
 			]
 		]
 	];
+}
+
+// ============================================================================
+// SCopyButton
+// ============================================================================
+
+void SCopyButton::Construct(const FArguments& InArgs)
+{
+	OnGetTextDelegate = InArgs._OnGetText;
+
+	ChildSlot
+	[
+		SNew(SButton)
+		.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+		.ContentPadding(FMargin(4.0f, 1.0f))
+		.ToolTipText(LOCTEXT("CopyMessageTooltip", "Copy this message to the clipboard"))
+		.OnClicked(this, &SCopyButton::OnCopyClicked)
+		[
+			SAssignNew(Label, STextBlock)
+			.Text(LOCTEXT("CopyMessage", "Copy"))
+			.TextStyle(FAppStyle::Get(), "SmallText")
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.6f, 0.6f, 0.65f)))
+		]
+	];
+}
+
+FReply SCopyButton::OnCopyClicked()
+{
+	const FString TextToCopy = OnGetTextDelegate.IsBound() ? OnGetTextDelegate.Execute() : FString();
+	FPlatformApplicationMisc::ClipboardCopy(*TextToCopy);
+
+	if (Label.IsValid())
+	{
+		Label->SetText(LOCTEXT("CopiedMessage", "Copied!"));
+	}
+
+	// Show the "Copied!" feedback for a short window. Re-clicking extends the deadline
+	// rather than stacking timers.
+	FeedbackDeadline = FSlateApplication::Get().GetCurrentTime() + 1.5;
+	if (!bShowingFeedback)
+	{
+		bShowingFeedback = true;
+		RegisterActiveTimer(0.25f, FWidgetActiveTimerDelegate::CreateSP(this, &SCopyButton::TickFeedback));
+	}
+
+	return FReply::Handled();
+}
+
+EActiveTimerReturnType SCopyButton::TickFeedback(double InCurrentTime, float InDeltaTime)
+{
+	if (InCurrentTime < FeedbackDeadline)
+	{
+		return EActiveTimerReturnType::Continue;
+	}
+
+	if (Label.IsValid())
+	{
+		Label->SetText(LOCTEXT("CopyMessage", "Copy"));
+	}
+	bShowingFeedback = false;
+	return EActiveTimerReturnType::Stop;
 }
 
 // ============================================================================
@@ -290,8 +368,7 @@ TSharedRef<SWidget> SClaudeEditorWidget::BuildToolbar()
 		.OnRefreshContext_Lambda([this]() { RefreshProjectContext(); })
 		.OnRestoreSession_Lambda([this]() { RestoreSession(); })
 		.OnNewSession_Lambda([this]() { NewSession(); })
-		.OnClear_Lambda([this]() { ClearChat(); })
-		.OnCopyLast_Lambda([this]() { CopyToClipboard(); });
+		.OnClear_Lambda([this]() { ClearChat(); });
 }
 
 TSharedRef<SWidget> SClaudeEditorWidget::BuildChatArea()
@@ -559,8 +636,6 @@ void SClaudeEditorWidget::OnClaudeResponse(const FString& Response, bool bSucces
 
 		FinalizeStreamingResponse();
 
-		LastResponse = StreamingResponse.IsEmpty() ? Response : StreamingResponse;
-
 		// Only add a new bubble if we had no streaming bubble at all
 		if (StreamingResponse.IsEmpty())
 		{
@@ -591,7 +666,6 @@ void SClaudeEditorWidget::ClearChat()
 
 	MessageHistory.Empty();
 	FClaudeCodeSubsystem::Get().ClearHistory();
-	LastResponse.Empty();
 	ResetStreamingState();
 
 	AddMessage(TEXT("Chat cleared. Ready for new questions!"), false);
@@ -602,15 +676,6 @@ void SClaudeEditorWidget::CancelRequest()
 	FClaudeCodeSubsystem::Get().CancelCurrentRequest();
 	bIsWaitingForResponse = false;
 	AddMessage(TEXT("Request cancelled."), false);
-}
-
-void SClaudeEditorWidget::CopyToClipboard()
-{
-	if (!LastResponse.IsEmpty())
-	{
-		FPlatformApplicationMisc::ClipboardCopy(*LastResponse);
-		UE_LOG(LogUnrealClaude, Log, TEXT("Copied response to clipboard"));
-	}
 }
 
 void SClaudeEditorWidget::RestoreSession()
@@ -660,7 +725,6 @@ void SClaudeEditorWidget::NewSession()
 
 	FClaudeCodeSubsystem::Get().ClearHistory();
 
-	LastResponse.Empty();
 	ResetStreamingState();
 
 	AddMessage(TEXT("New session started. Previous context has been cleared."), false);
@@ -779,16 +843,36 @@ void SClaudeEditorWidget::StartStreamingResponse()
 		// First text segment is wrapped in its own container so it can be swapped for Markdown / code blocks on finalize
 		TSharedPtr<SVerticalBox> FirstSegmentContainer;
 
+		// Per-bubble copy text: the button reads this ref so it always copies this
+		// response, even after later requests overwrite the streaming members.
+		StreamingCopyTextRef = MakeShared<FString>();
+		TSharedPtr<FString> CopyTextRef = StreamingCopyTextRef;
+
 		SAssignNew(StreamingContentBox, SVerticalBox)
 
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 0, 0, 6)
 		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Claude")))
-			.TextStyle(FAppStyle::Get(), "SmallText")
-			.ColorAndOpacity(FSlateColor(FLinearColor(0.9f, 0.6f, 0.3f)))
+			SNew(SHorizontalBox)
+
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Claude")))
+				.TextStyle(FAppStyle::Get(), "SmallText")
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.9f, 0.6f, 0.3f)))
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCopyButton)
+				.OnGetText_Lambda([CopyTextRef]() { return CopyTextRef.IsValid() ? *CopyTextRef : FString(); })
+			]
 		]
 
 		+ SVerticalBox::Slot()
@@ -907,9 +991,7 @@ void SClaudeEditorWidget::FinalizeStreamingResponse()
 {
 	AllTextSegments.Add(CurrentSegmentText);
 
-	LastResponse = StreamingResponse.IsEmpty() ? CurrentSegmentText : StreamingResponse;
-
-	// Stitch all segments back together so CopyToClipboard returns the full response
+	// Stitch all segments back together so the per-message copy button gets the full response
 	FString Rebuilt;
 	for (const FString& Segment : AllTextSegments)
 	{
@@ -918,8 +1000,14 @@ void SClaudeEditorWidget::FinalizeStreamingResponse()
 	if (!Rebuilt.IsEmpty())
 	{
 		StreamingResponse = Rebuilt;
-		LastResponse = StreamingResponse;
 	}
+
+	// Freeze this bubble's copy text so its copy button keeps copying this response
+	if (StreamingCopyTextRef.IsValid())
+	{
+		*StreamingCopyTextRef = StreamingResponse.IsEmpty() ? CurrentSegmentText : StreamingResponse;
+	}
+	StreamingCopyTextRef.Reset();
 
 	// Render each segment in its own container so text appears before/after tool blocks in the right order
 	for (int32 i = 0; i < TextSegmentContainers.Num() && i < AllTextSegments.Num(); ++i)

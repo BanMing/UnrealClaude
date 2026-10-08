@@ -13,6 +13,7 @@ class SVerticalBox;
 class SClaudeInputArea;
 class SExpandableArea;
 class SMarkdownWidget;
+class STextBlock;
 
 /**
  * Helper widget that wraps a scroll box and provides right-click drag scrolling
@@ -39,6 +40,35 @@ private:
 	bool bIsDragging = false;
 	FVector2D DragStartMousePos;
 	float DragStartScrollOffset = 0.0f;
+};
+
+/** Returns the text that a copy button should place on the clipboard (evaluated at click time) */
+DECLARE_DELEGATE_RetVal(FString, FOnGetCopyText)
+
+/**
+ * Small "Copy" button that copies a caller-provided string to the clipboard and
+ * briefly shows "Copied!" feedback. The text is resolved lazily via OnGetText so it
+ * works for content that is still streaming when the button is created.
+ */
+class SCopyButton : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SCopyButton)
+	{}
+		/** Called on click to obtain the text to copy */
+		SLATE_EVENT(FOnGetCopyText, OnGetText)
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs);
+
+private:
+	FReply OnCopyClicked();
+	EActiveTimerReturnType TickFeedback(double InCurrentTime, float InDeltaTime);
+
+	FOnGetCopyText OnGetTextDelegate;
+	TSharedPtr<STextBlock> Label;
+	bool bShowingFeedback = false;
+	double FeedbackDeadline = 0.0;
 };
 
 /**
@@ -100,9 +130,6 @@ private:
 	/** Cancel current request */
 	void CancelRequest();
 
-	/** Copy selected text or last response */
-	void CopyToClipboard();
-
 	/** Restore previous session context */
 	void RestoreSession();
 
@@ -152,11 +179,13 @@ private:
 	/** Final stats from the Result event (persists after streaming ends until next request) */
 	FString LastResultStats;
 
-	/** Last response for copying */
-	FString LastResponse;
-
 	/** Accumulated streaming response */
 	FString StreamingResponse;
+
+	/** Per-bubble copy text for the current streaming response, filled in on finalize.
+	 *  Held by shared ref so the streaming bubble's copy button keeps copying its own
+	 *  text even after later requests overwrite StreamingResponse. */
+	TSharedPtr<FString> StreamingCopyTextRef;
 
 	/** Current streaming message widget (for updating in place) */
 	TSharedPtr<STextBlock> StreamingTextBlock;

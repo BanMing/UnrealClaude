@@ -24,7 +24,6 @@ void SClaudeToolbar::Construct(const FArguments& InArgs)
 	OnRestoreSession = InArgs._OnRestoreSession;
 	OnNewSession = InArgs._OnNewSession;
 	OnClear = InArgs._OnClear;
-	OnCopyLast = InArgs._OnCopyLast;
 
 	ChildSlot
 	[
@@ -129,18 +128,6 @@ void SClaudeToolbar::Construct(const FArguments& InArgs)
 				.Text(LOCTEXT("Clear", "Clear"))
 				.OnClicked_Lambda([this]() { OnClear.ExecuteIfBound(); return FReply::Handled(); })
 				.ToolTipText(LOCTEXT("ClearTip", "Clear chat display"))
-			]
-
-			// Copy button
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(4.0f, 0.0f)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("Copy", "Copy Last"))
-				.OnClicked_Lambda([this]() { OnCopyLast.ExecuteIfBound(); return FReply::Handled(); })
-				.ToolTipText(LOCTEXT("CopyTip", "Copy last response to clipboard"))
 			]
 
 			// Selection mode toggle button (at the far right)

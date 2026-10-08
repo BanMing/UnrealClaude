@@ -33,7 +33,6 @@ public:
 		SLATE_EVENT(FOnToolbarAction, OnRestoreSession)
 		SLATE_EVENT(FOnToolbarAction, OnNewSession)
 		SLATE_EVENT(FOnToolbarAction, OnClear)
-		SLATE_EVENT(FOnToolbarAction, OnCopyLast)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
@@ -51,5 +50,4 @@ private:
 	FOnToolbarAction OnRestoreSession;
 	FOnToolbarAction OnNewSession;
 	FOnToolbarAction OnClear;
-	FOnToolbarAction OnCopyLast;
 };
