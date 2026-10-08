@@ -33,6 +33,7 @@
 #include "Tools/MCPTool_OpenLevel.h"
 #include "Tools/MCPTool_UMGQuery.h"
 #include "Tools/MCPTool_UMGModify.h"
+#include "Tools/MCPTool_UMGSnapshot.h"
 #include "Tools/MCPTool_MaterialGraph.h"
 #include "Tools/MCPTool_MaterialHLSL.h"
 #include "Tools/MCPTool_UMGAnimation.h"
@@ -138,6 +139,7 @@ void FMCPToolRegistry::RegisterBuiltinTools()
 	// UMG widget tools (Story 1: UMG CRUD — adapted from UmgMcp MIT)
 	RegisterTool(MakeShared<FMCPTool_UMGQuery>());
 	RegisterTool(MakeShared<FMCPTool_UMGModify>());
+	RegisterTool(MakeShared<FMCPTool_UMGSnapshot>());
 
 	// Material graph tools (Story 2: Material Graph + HLSL — adapted from UmgMcp MIT)
 	RegisterTool(MakeShared<FMCPTool_MaterialGraph>());
