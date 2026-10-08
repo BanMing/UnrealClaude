@@ -358,6 +358,21 @@ FMCPToolResult FMCPTool_UMGModify::ExecuteDeleteWidget(const TSharedRef<FJsonObj
     // Strip GUID binding if present.
     WBP->WidgetVariableNameToGuidMap.Remove(Target->GetFName());
 
+    // Release the name by evicting the object from the WidgetTree outer.
+    //
+    // Detaching from the parent does NOT free the name: the UObject stays
+    // alive under the same outer until GC collects it. A caller who deletes
+    // a widget and then creates a replacement under the same name — the
+    // natural way to change a widget's class — would otherwise hit
+    // NewObject's "Cannot replace existing object of a different class"
+    // assert (UObjectGlobals.cpp:3533) and take the editor down. Whether it
+    // crashes depends on whether GC happened to run in between, which makes
+    // it an intermittent fatal rather than a reliable error.
+    //
+    // Matches the engine's own disposal idiom in FWidgetBlueprintEditorUtils.
+    Target->Rename(nullptr, GetTransientPackage(),
+        REN_DontCreateRedirectors | REN_DoNotDirty);
+
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -556,11 +571,22 @@ FMCPToolResult FMCPTool_UMGModify::ExecuteSetRootWidget(const TSharedRef<FJsonOb
  * NOT cloned (different panel slot types carry different fields); callers
  * are expected to re-apply slot config via set_widget_properties after.
  *
+ * Two things this does NOT do, both of which previously failed silently or
+ * fatally and are now explicit:
+ *   - It does not carry children across. A populated panel is rejected up
+ *     front rather than having its subtree destroyed (step 2.5).
+ *   - It does not leave the old object squatting on its name. The old widget
+ *     is renamed into the transient package before the replacement is built,
+ *     without which a class-changing replace hard-asserts inside NewObject
+ *     and kills the editor (step 4.5).
+ *
  * Steps:
  *   1. Resolve blueprint + target widget_name + replacement_name + replacement_type.
  *   2. Capture old widget's parent + sibling index.
+ *   2.5 Reject the call if the target still has children.
  *   3. Resolve replacement UClass; verify UWidget subclass.
  *   4. Remove old widget from parent; strip GUID binding.
+ *   4.5 Rename the old widget out of the WidgetTree to free its name.
  *   5. Construct the replacement under the WidgetTree.
  *   6. Add replacement back to the parent — if a sibling index was captured,
  *      shift it into that position via RemoveChild + InsertChildAt.
@@ -621,6 +647,32 @@ FMCPToolResult FMCPTool_UMGModify::ExecuteReplaceWidget(const TSharedRef<FJsonOb
         SiblingIndex = OldParent->GetChildIndex(OldWidget);
     }
 
+    // Step 2.5 — refuse to replace a widget that still has children.
+    //
+    // This operation swaps ONE widget; it has no defined behaviour for the
+    // subtree underneath. Replacing a populated panel silently destroys every
+    // descendant along with it — the caller asked to change one widget's class
+    // and loses an entire branch of their layout, with a success result and no
+    // warning. (Observed: replacing a UButton root with an Overlay took the
+    // button's label child with it.)
+    //
+    // Failing loudly is strictly better than a lossy success. The caller can
+    // reparent the children out, replace, then reparent them back — all three
+    // steps being operations this same tool already exposes.
+    if (const UPanelWidget* OldPanel = Cast<UPanelWidget>(OldWidget))
+    {
+        const int32 ChildCount = OldPanel->GetChildrenCount();
+        if (ChildCount > 0)
+        {
+            return FMCPToolResult::Error(FString::Printf(
+                TEXT("Widget '%s' has %d child widget(s); replace_widget would ")
+                TEXT("destroy them along with it. Reparent the children to ")
+                TEXT("another panel first (reparent_widget), then replace, then ")
+                TEXT("move them back."),
+                *WidgetName, ChildCount));
+        }
+    }
+
     // Step 3 — resolve replacement class.
     UClass* ReplacementClass = UMGCommonUtils::ResolveWidgetClass(ReplacementType);
     if (!ReplacementClass)
@@ -655,6 +707,34 @@ FMCPToolResult FMCPTool_UMGModify::ExecuteReplaceWidget(const TSharedRef<FJsonOb
         Tree->RootWidget = nullptr;
     }
     WBP->WidgetVariableNameToGuidMap.Remove(OldWidget->GetFName());
+
+    // Step 4.5 — evict the old object from the WidgetTree outer BEFORE
+    // constructing the replacement.
+    //
+    // THIS IS NOT OPTIONAL WHEN THE NAME IS REUSED. Detaching a widget from
+    // its parent does not destroy the UObject: it stays alive under the same
+    // outer (the WidgetTree) still holding the same name. ConstructWidget
+    // below calls NewObject with that name in that outer, and NewObject
+    // hard-asserts when an object of a DIFFERENT class already occupies it:
+    //
+    //   Fatal error: UObjectGlobals.cpp:3533
+    //   Cannot replace existing object of a different class.
+    //
+    // That assert takes the editor down with no save and no recovery. It
+    // fires precisely in this tool's headline use case — swapping a widget
+    // for one of another class while keeping its name — so it is the common
+    // path, not an edge case. A same-class replacement happens to survive,
+    // because NewObject permits in-place replacement there; that is why the
+    // bug could sit here unnoticed.
+    //
+    // Renaming into the transient package is the engine's own idiom for
+    // discarding a widget template (see FWidgetBlueprintEditorUtils, which
+    // does exactly this in both its replace and its delete paths).
+    //
+    // REN_DontCreateRedirectors: this is a transient editor-side object, and
+    // a redirector would outlive it pointing into the transient package.
+    OldWidget->Rename(nullptr, GetTransientPackage(),
+        REN_DontCreateRedirectors | REN_DoNotDirty);
 
     // Step 5 — construct the replacement under the same tree.
     UWidget* NewWidget = Tree->ConstructWidget<UWidget>(ReplacementClass, FName(*ReplacementName));
